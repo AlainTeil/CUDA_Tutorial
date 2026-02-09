@@ -1,0 +1,11 @@
+# Lesson 06 — Memory Transfers (pinned & unified)
+add_executable(06_memory_transfers memory_transfers.cu)
+target_link_libraries(06_memory_transfers PRIVATE CUDA::cudart)
+set_project_warnings(06_memory_transfers)
+
+if(CUDA_TUTORIAL_BUILD_TESTS)
+  add_executable(06_memory_transfers_test memory_transfers_test.cu)
+  target_link_libraries(06_memory_transfers_test PRIVATE GTest::gtest_main CUDA::cudart)
+  set_project_warnings(06_memory_transfers_test)
+  gtest_discover_tests(06_memory_transfers_test)
+endif()

@@ -1,0 +1,11 @@
+# Lesson 09 — Prefix Sum (Scan)
+add_executable(09_scan scan.cu)
+target_link_libraries(09_scan PRIVATE CUDA::cudart)
+set_project_warnings(09_scan)
+
+if(CUDA_TUTORIAL_BUILD_TESTS)
+  add_executable(09_scan_test scan_test.cu)
+  target_link_libraries(09_scan_test PRIVATE GTest::gtest_main CUDA::cudart)
+  set_project_warnings(09_scan_test)
+  gtest_discover_tests(09_scan_test)
+endif()

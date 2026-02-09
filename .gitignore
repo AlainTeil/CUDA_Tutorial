@@ -1,0 +1,30 @@
+# Build directories
+build/
+build-clang/
+cmake-build-*/
+out/
+
+# Compiled objects / libraries
+*.o
+*.a
+*.so
+*.dylib
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Doxygen output
+docs/html/
+docs/latex/
+
+# ccache / compiler caches
+.cache/
+compile_commands.json
+
+# OS junk
+.DS_Store
+Thumbs.db
