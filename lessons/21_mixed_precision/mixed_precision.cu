@@ -892,15 +892,13 @@ static float train_and_evaluate(PrecisionMode mode, const char* label) {
     }
   }
 
-  // Evaluate on training set.
-  CUDA_CHECK(cudaMemcpy(d_bx, flat_data.data(), static_cast<size_t>(N_TOTAL) * 4 * sizeof(float),
-                        cudaMemcpyHostToDevice));
-
-  // Predict in chunks of BATCH_SIZE to respect buffer sizes.
+  // Evaluate on training set in chunks of BATCH_SIZE to respect buffer sizes.
   int correct = 0;
   for (int start = 0; start + BATCH_SIZE <= N_TOTAL; start += BATCH_SIZE) {
-    float* chunk_ptr = d_bx + start * 4;
-    auto preds = mlp.predict_batch(chunk_ptr, BATCH_SIZE);
+    CUDA_CHECK(cudaMemcpy(d_bx, &flat_data[static_cast<size_t>(start) * 4],
+                          static_cast<size_t>(BATCH_SIZE) * 4 * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    auto preds = mlp.predict_batch(d_bx, BATCH_SIZE);
     for (int b = 0; b < BATCH_SIZE; ++b) {
       if (preds[static_cast<size_t>(b)] == labels[static_cast<size_t>(start + b)]) {
         ++correct;

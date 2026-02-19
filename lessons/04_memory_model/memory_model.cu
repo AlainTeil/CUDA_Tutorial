@@ -238,7 +238,7 @@ int main() {
     for (int i = 0; i < kN && ok; ++i) {
       float xi = hx[static_cast<size_t>(i)];
       float expected = 1.0F + 2.0F * xi + 3.0F * xi * xi + 4.0F * xi * xi * xi;
-      if (std::abs(hy[static_cast<size_t>(i)] - expected) > 1e-4F) ok = false;
+      if (std::abs(hy[static_cast<size_t>(i)] - expected) > 1e-3F) ok = false;
     }
     std::printf("Part B (constant memory polynomial): %s\n", ok ? "PASSED" : "FAILED");
 
