@@ -56,27 +56,40 @@
 // ReLU
 // =============================================================================
 
-/// @brief ReLU forward: out = max(0, in).
-///
-/// ReLU is the most popular activation in modern deep learning because:
-/// 1. It's **fast** — just a comparison + conditional move.
-/// 2. It doesn't saturate for positive inputs (unlike sigmoid/tanh),
-///    so gradients flow freely through deep networks.
-/// 3. It induces **sparsity** — roughly 50% of neurons output zero.
-///
-/// The downside is the "dying ReLU" problem: if a neuron's pre-activation
-/// is always negative, its gradient is always zero and it never updates.
-/// Variants like Leaky ReLU (f(x) = max(0.01x, x)) address this.
+/**
+ * @brief ReLU forward: out = max(0, in).
+ *
+ * ReLU is the most popular activation in modern deep learning because:
+ * 1. It's **fast** — just a comparison + conditional move.
+ * 2. It doesn't saturate for positive inputs (unlike sigmoid/tanh),
+ *    so gradients flow freely through deep networks.
+ * 3. It induces **sparsity** — roughly 50% of neurons output zero.
+ *
+ * The downside is the "dying ReLU" problem: if a neuron's pre-activation
+ * is always negative, its gradient is always zero and it never updates.
+ * Variants like Leaky ReLU (f(x) = max(0.01x, x)) address this.
+ *
+ * @param in   Input tensor (n elements).
+ * @param out  Output tensor (n elements).
+ * @param n    Total number of elements.
+ */
 __global__ void relu_forward(const float* in, float* out, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) out[idx] = fmaxf(0.0F, in[idx]);
 }
 
-/// @brief ReLU backward: grad_in = (in > 0) ? grad_out : 0.
-///
-/// The gradient of max(0, x) is a step function: 1 for x > 0, 0 otherwise.
-/// This is the simplest example of the chain rule on the GPU: multiply the
-/// upstream gradient (`grad_out`) by the local derivative.
+/**
+ * @brief ReLU backward: grad_in = (in > 0) ? grad_out : 0.
+ *
+ * The gradient of max(0, x) is a step function: 1 for x > 0, 0 otherwise.
+ * This is the simplest example of the chain rule on the GPU: multiply the
+ * upstream gradient (`grad_out`) by the local derivative.
+ *
+ * @param in        Original input tensor (n elements), used for the sign test.
+ * @param grad_out  Upstream gradient tensor (n elements).
+ * @param grad_in   Output downstream gradient tensor (n elements).
+ * @param n         Total number of elements.
+ */
 __global__ void relu_backward(const float* in, const float* grad_out, float* grad_in, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) grad_in[idx] = (in[idx] > 0.0F) ? grad_out[idx] : 0.0F;
@@ -86,22 +99,35 @@ __global__ void relu_backward(const float* in, const float* grad_out, float* gra
 // Sigmoid
 // =============================================================================
 
-/// @brief Sigmoid forward: out = 1 / (1 + exp(-in)).
-///
-/// Squashes any real value into (0, 1).  Historically used for binary
-/// classification outputs.  In modern networks, sigmoid is mostly used in
-/// gates (LSTM, attention) rather than hidden layers, because it **saturates**
-/// for large |x| — the gradient approaches zero, slowing learning.
+/**
+ * @brief Sigmoid forward: out = σ(in) = 1 / (1 + exp(-in)).
+ *
+ * Squashes any real value into (0, 1).  Historically used for binary
+ * classification outputs.  In modern networks, sigmoid is mostly used in
+ * gates (LSTM, attention) rather than hidden layers, because it **saturates**
+ * for large |x| — the gradient approaches zero, slowing learning.
+ *
+ * @param in   Input tensor (n elements).
+ * @param out  Output tensor (n elements).
+ * @param n    Total number of elements.
+ */
 __global__ void sigmoid_forward(const float* in, float* out, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) out[idx] = 1.0F / (1.0F + expf(-in[idx]));
 }
 
-/// @brief Sigmoid backward: grad_in = grad_out * s * (1 - s).
-///
-/// Note that the backward takes `out` (not `in`) — the sigmoid value itself.
-/// This avoids re-computing exp(-x).  The derivative σ'·(1−σ) has a maximum
-/// of 0.25 at x = 0, so gradients are always attenuated through sigmoid.
+/**
+ * @brief Sigmoid backward: grad_in = grad_out * σ(x) * (1 − σ(x)).
+ *
+ * Note that the backward takes `out` (not `in`) — the sigmoid value itself.
+ * This avoids re-computing exp(-x).  The derivative σ'·(1−σ) has a maximum
+ * of 0.25 at x = 0, so gradients are always attenuated through sigmoid.
+ *
+ * @param out       Forward-pass output (σ values), used to compute the derivative.
+ * @param grad_out  Upstream gradient tensor (n elements).
+ * @param grad_in   Output downstream gradient tensor (n elements).
+ * @param n         Total number of elements.
+ */
 __global__ void sigmoid_backward(const float* out, const float* grad_out, float* grad_in, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) {
@@ -114,21 +140,34 @@ __global__ void sigmoid_backward(const float* out, const float* grad_out, float*
 // Tanh
 // =============================================================================
 
-/// @brief Tanh forward: out = tanh(in).
-///
-/// Maps inputs to (-1, 1).  Zero-centred (unlike sigmoid), which helps
-/// gradient flow.  The CUDA intrinsic `tanhf()` uses a hardware-accelerated
-/// approximation that is accurate to single-precision ULP.
+/**
+ * @brief Tanh forward: out = tanh(in).
+ *
+ * Maps inputs to (-1, 1).  Zero-centred (unlike sigmoid), which helps
+ * gradient flow.  The CUDA intrinsic `tanhf()` uses a hardware-accelerated
+ * approximation that is accurate to single-precision ULP.
+ *
+ * @param in   Input tensor (n elements).
+ * @param out  Output tensor (n elements).
+ * @param n    Total number of elements.
+ */
 __global__ void tanh_forward(const float* in, float* out, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) out[idx] = tanhf(in[idx]);
 }
 
-/// @brief Tanh backward: grad_in = grad_out * (1 - t^2).
-///
-/// Like sigmoid, the backward uses the **output** `t = tanh(x)` to avoid
-/// recomputing the forward.  The derivative 1 − t² has a peak of 1 at x = 0
-/// and decays towards zero for large |x| (saturation).
+/**
+ * @brief Tanh backward: grad_in = grad_out * (1 − tanh²(x)).
+ *
+ * Like sigmoid, the backward uses the **output** `t = tanh(x)` to avoid
+ * recomputing the forward.  The derivative 1 − t² has a peak of 1 at x = 0
+ * and decays towards zero for large |x| (saturation).
+ *
+ * @param out       Forward-pass output (tanh values), used to compute the derivative.
+ * @param grad_out  Upstream gradient tensor (n elements).
+ * @param grad_in   Output downstream gradient tensor (n elements).
+ * @param n         Total number of elements.
+ */
 __global__ void tanh_backward(const float* out, const float* grad_out, float* grad_in, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) {
@@ -158,6 +197,10 @@ __global__ void tanh_backward(const float* out, const float* grad_out, float* gr
  *
  * For very wide rows (many classes), multiple threads per class handle
  * the strided loop, and the reduction combines their partial results.
+ *
+ * @param in    Input tensor (batch × cols), one row per sample.
+ * @param out   Output tensor (batch × cols), softmax probabilities.
+ * @param cols  Number of columns (classes) per row.
  */
 __global__ void softmax_forward(const float* in, float* out, int cols) {
   extern __shared__ float sdata[];
@@ -213,6 +256,7 @@ int main() {
 
   // ReLU
   relu_forward<<<1, kN>>>(d_in, d_out, kN);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, kN * sizeof(float), cudaMemcpyDeviceToHost));
   std::printf("ReLU:    ");
@@ -221,6 +265,7 @@ int main() {
 
   // Sigmoid
   sigmoid_forward<<<1, kN>>>(d_in, d_out, kN);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, kN * sizeof(float), cudaMemcpyDeviceToHost));
   std::printf("Sigmoid: ");
@@ -229,6 +274,7 @@ int main() {
 
   // Tanh
   tanh_forward<<<1, kN>>>(d_in, d_out, kN);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, kN * sizeof(float), cudaMemcpyDeviceToHost));
   std::printf("Tanh:    ");
@@ -238,6 +284,7 @@ int main() {
   // Softmax (treat as 1 row of 8)
   int smem = 256 * sizeof(float);
   softmax_forward<<<1, 256, smem>>>(d_in, d_out, kN);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, kN * sizeof(float), cudaMemcpyDeviceToHost));
   std::printf("Softmax: ");

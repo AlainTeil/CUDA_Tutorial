@@ -266,11 +266,17 @@ static float roofline_ridge_point(int device = 0) {
 /// @defgroup benchmark_kernels Benchmark example kernels
 /// @{
 
-/// **Vector add** — classic memory-bound kernel.
-///
-/// Each element requires: 2 loads (8 bytes) + 1 store (4 bytes) = 12 bytes,
-/// and 1 FLOP (addition).  Arithmetic intensity = 1/12 ≈ 0.083 FLOP/byte,
-/// far below even the lowest ridge point.  → **Memory-bound**.
+/**
+ * @brief Vector addition — classic memory-bound kernel.
+ *
+ * Each element: 2 loads + 1 store = 12 bytes, 1 FLOP.
+ * Arithmetic intensity ≈ 0.083 FLOP/byte → memory-bound.
+ *
+ * @param a  First input array (device pointer, length n).
+ * @param b  Second input array (device pointer, length n).
+ * @param c  Output array: c[i] = a[i] + b[i] (device pointer, length n).
+ * @param n  Number of elements.
+ */
 __global__ void vector_add_kernel(const float* __restrict__ a, const float* __restrict__ b,
                                   float* __restrict__ c, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -279,10 +285,17 @@ __global__ void vector_add_kernel(const float* __restrict__ a, const float* __re
   }
 }
 
-/// **Saxpy** (y = a·x + y) — also memory-bound.
-///
-/// Each element: 2 loads + 1 store = 12 bytes, 2 FLOPs (multiply + add).
-/// AI = 2/12 ≈ 0.167 FLOP/byte.  Still memory-bound.
+/**
+ * @brief SAXPY (y = a*x + y) — memory-bound kernel.
+ *
+ * Each element: 2 loads + 1 store = 12 bytes, 2 FLOPs.
+ * Arithmetic intensity ≈ 0.167 FLOP/byte → still memory-bound.
+ *
+ * @param a  Scalar multiplier.
+ * @param x  Input array (device pointer, length n).
+ * @param y  In/out array: y[i] = a*x[i] + y[i] (device pointer, length n).
+ * @param n  Number of elements.
+ */
 __global__ void saxpy_kernel(float a, const float* __restrict__ x, float* __restrict__ y, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
@@ -290,11 +303,15 @@ __global__ void saxpy_kernel(float a, const float* __restrict__ x, float* __rest
   }
 }
 
-/// **Reduction** — memory-bound with sequential dependency.
-///
-/// Reads N elements (4N bytes), produces 1 output (4 bytes).
-/// N-1 FLOPs (additions).  AI ≈ (N-1)/(4N) → ~0.25 FLOP/byte for large N.
-/// Still on the memory-bound side, limited by global memory read bandwidth.
+/**
+ * @brief Shared-memory reduction sum — memory-bound with sequential dependency.
+ *
+ * Reads N elements (4N bytes), produces 1 output. AI ≈ 0.25 FLOP/byte.
+ *
+ * @param in   Input array (device pointer, length n).
+ * @param out  Scalar sum output (device pointer; uses atomicAdd across blocks).
+ * @param n    Number of elements.
+ */
 __global__ void reduce_sum_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -310,15 +327,16 @@ __global__ void reduce_sum_kernel(const float* __restrict__ in, float* __restric
   if (tid == 0) atomicAdd(out, sdata[0]);
 }
 
-/// **Heavy compute** — artificial compute-bound kernel.
-///
-/// Each thread performs `ITERS` iterations of a fused multiply-add chain
-/// per element, creating a very high arithmetic intensity.
-///
-/// Memory: 1 load + 1 store = 8 bytes per element.
-/// Compute: ITERS × 2 FLOPs (one multiply + one add).
-/// AI = (ITERS × 2) / 8.  With ITERS = 256, AI = 64 FLOP/byte.
-/// → **Compute-bound** on virtually any GPU.
+/**
+ * @brief Artificial compute-bound kernel with high arithmetic intensity.
+ *
+ * Each thread performs COMPUTE_ITERS FMA iterations per element.
+ * AI = (ITERS×2)/8 = 64 FLOP/byte with ITERS=256 → compute-bound.
+ *
+ * @param x  Input array (device pointer, length n).
+ * @param y  Output array (device pointer, length n).
+ * @param n  Number of elements.
+ */
 constexpr int COMPUTE_ITERS = 256;  ///< 512 FLOP per element → AI = 64.
 
 __global__ void heavy_compute_kernel(const float* __restrict__ x, float* __restrict__ y, int n) {
@@ -411,8 +429,10 @@ int main() {
   // Benchmark 1: Vector Add  (memory-bound)
   // -----------------------------------------------------------------------
   {
-    auto result = benchmark_kernel(WARMUP, TRIALS,
-                                   [&]() { vector_add_kernel<<<grid, blk>>>(d_a, d_b, d_c, N); });
+    auto result = benchmark_kernel(WARMUP, TRIALS, [&]() {
+      vector_add_kernel<<<grid, blk>>>(d_a, d_b, d_c, N);
+      CUDA_CHECK(cudaGetLastError());
+    });
     // 2 reads + 1 write = 3 × N × 4 bytes.
     size_t total_bytes = 3UL * N * sizeof(float);
     size_t total_flops = static_cast<size_t>(N);  // 1 add per element.
@@ -434,8 +454,10 @@ int main() {
   // -----------------------------------------------------------------------
   {
     CUDA_CHECK(cudaMemcpy(d_c, h_data.data(), BYTES, cudaMemcpyHostToDevice));
-    auto result =
-        benchmark_kernel(WARMUP, TRIALS, [&]() { saxpy_kernel<<<grid, blk>>>(2.0F, d_a, d_c, N); });
+    auto result = benchmark_kernel(WARMUP, TRIALS, [&]() {
+      saxpy_kernel<<<grid, blk>>>(2.0F, d_a, d_c, N);
+      CUDA_CHECK(cudaGetLastError());
+    });
     size_t total_bytes = 3UL * N * sizeof(float);  // 2 loads (x, y) + 1 store (y).
     size_t total_flops = 2UL * N;                  // multiply + add.
     float ai = static_cast<float>(total_flops) / static_cast<float>(total_bytes);
@@ -461,6 +483,7 @@ int main() {
     auto result = benchmark_kernel(WARMUP, TRIALS, [&]() {
       CUDA_CHECK(cudaMemset(d_sum, 0, sizeof(float)));
       reduce_sum_kernel<<<grid, blk, static_cast<size_t>(blk) * sizeof(float)>>>(d_a, d_sum, N);
+      CUDA_CHECK(cudaGetLastError());
     });
     size_t total_bytes = static_cast<size_t>(N) * sizeof(float);  // N reads.
     size_t total_flops = static_cast<size_t>(N) - 1;              // N-1 adds.
@@ -483,8 +506,10 @@ int main() {
   // Benchmark 4: Heavy compute (compute-bound)
   // -----------------------------------------------------------------------
   {
-    auto result = benchmark_kernel(WARMUP, TRIALS,
-                                   [&]() { heavy_compute_kernel<<<grid, blk>>>(d_a, d_c, N); });
+    auto result = benchmark_kernel(WARMUP, TRIALS, [&]() {
+      heavy_compute_kernel<<<grid, blk>>>(d_a, d_c, N);
+      CUDA_CHECK(cudaGetLastError());
+    });
     size_t total_bytes = 2UL * N * sizeof(float);                       // 1 load + 1 store.
     size_t total_flops = 2UL * COMPUTE_ITERS * static_cast<size_t>(N);  // ITERS FMAs × 2.
     float ai = static_cast<float>(total_flops) / static_cast<float>(total_bytes);

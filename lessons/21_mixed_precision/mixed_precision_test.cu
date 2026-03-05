@@ -20,6 +20,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <random>
@@ -29,7 +31,15 @@
 // Error-checking macros (test versions — use ASSERT for cleaner output)
 // =============================================================================
 
-#define CUDA_ASSERT(call) ASSERT_EQ((call), cudaSuccess)
+#define CUDA_ASSERT(call)                                                   \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
+  } while (0)
 #define CUBLAS_ASSERT(call) ASSERT_EQ((call), CUBLAS_STATUS_SUCCESS)
 
 // Abort-style macros (needed by functions shared with the main source).
@@ -78,11 +88,13 @@ __global__ void fp16_to_fp32_kernel(const __half* __restrict__ src, float* __res
 static void fp32_to_fp16(const float* d_src, __half* d_dst, int n) {
   int blk = 256;
   fp32_to_fp16_kernel<<<(n + blk - 1) / blk, blk>>>(d_src, d_dst, n);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 static void fp16_to_fp32(const __half* d_src, float* d_dst, int n) {
   int blk = 256;
   fp16_to_fp32_kernel<<<(n + blk - 1) / blk, blk>>>(d_src, d_dst, n);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 // =============================================================================
@@ -266,14 +278,19 @@ struct MixedPrecisionMLP {
     int blk = 256;
     gemm_fp32(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, A1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     gemm_fp32(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(B * out_dim + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     batch_log_softmax<<<B, 1>>>(Z2, LS, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     float* d_loss;
     CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
     CUDA_CHECK(cudaMemset(d_loss, 0, sizeof(float)));
     ce_loss_kernel<<<1, 1>>>(LS, d_target, d_loss, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     float h_loss = 0.0F;
     CUDA_CHECK(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_loss));
@@ -288,16 +305,21 @@ struct MixedPrecisionMLP {
     gemm_fp16(cublas, B, in_dim, hid_dim, 1.0F, X_h, W1_h, 0.0F, Z1_h);
     fp16_to_fp32(Z1_h, Z1, B * hid_dim);
     add_bias<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, A1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     fp32_to_fp16(A1, A1_h, B * hid_dim);
     gemm_fp16(cublas, B, hid_dim, out_dim, 1.0F, A1_h, W2_h, 0.0F, Z2_h);
     fp16_to_fp32(Z2_h, Z2, B * out_dim);
     add_bias<<<(B * out_dim + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     batch_log_softmax<<<B, 1>>>(Z2, LS, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     float* d_loss;
     CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
     CUDA_CHECK(cudaMemset(d_loss, 0, sizeof(float)));
     ce_loss_kernel<<<1, 1>>>(LS, d_target, d_loss, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     float h_loss = 0.0F;
     CUDA_CHECK(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_loss));
@@ -313,18 +335,24 @@ struct MixedPrecisionMLP {
     int blk = 256;
     float inv_B = 1.0F / static_cast<float>(B);
     ce_bwd<<<(B * out_dim + blk - 1) / blk, blk>>>(LS, d_target, dZ2, B * out_dim);
+    CUDA_CHECK(cudaGetLastError());
     gemm_fp32_AT(cublas, hid_dim, B, out_dim, inv_B, A1, dZ2, 0.0F, dW2);
     col_sum<<<(out_dim + blk - 1) / blk, blk>>>(dZ2, db2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     {
       float one = 1.0F, zero = 0.0F;
       CUBLAS_CHECK(cublasSgemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, hid_dim, B, out_dim, &one, W2,
                                out_dim, dZ2, out_dim, &zero, dA1, hid_dim));
     }
     relu_bwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, dA1, dZ1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     gemm_fp32_AT(cublas, in_dim, B, hid_dim, inv_B, d_X, dZ1, 0.0F, dW1);
     col_sum<<<(hid_dim + blk - 1) / blk, blk>>>(dZ1, db1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
   }
 
@@ -333,12 +361,16 @@ struct MixedPrecisionMLP {
     int blk = 256;
     float inv_B = 1.0F / static_cast<float>(B);
     ce_bwd<<<(B * out_dim + blk - 1) / blk, blk>>>(LS, d_target, dZ2, B * out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(B * out_dim + blk - 1) / blk, blk>>>(dZ2, loss_scale, B * out_dim);
+    CUDA_CHECK(cudaGetLastError());
     fp32_to_fp16(dZ2, dZ2_h, B * out_dim);
     gemm_fp16_AT(cublas, hid_dim, B, out_dim, inv_B, A1_h, dZ2_h, 0.0F, dW2_h);
     fp16_to_fp32(dW2_h, dW2, hid_dim * out_dim);
     col_sum<<<(out_dim + blk - 1) / blk, blk>>>(dZ2, db2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     {
       float one = 1.0F, zero = 0.0F;
       CUBLAS_CHECK(cublasGemmEx(cublas, CUBLAS_OP_T, CUBLAS_OP_N, hid_dim, B, out_dim, &one, W2_h,
@@ -348,18 +380,25 @@ struct MixedPrecisionMLP {
     }
     fp16_to_fp32(dA1_h, dA1, B * hid_dim);
     relu_bwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, dA1, dZ1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     fp32_to_fp16(dZ1, dZ1_h, B * hid_dim);
     gemm_fp16_AT(cublas, in_dim, B, hid_dim, inv_B, X_h, dZ1_h, 0.0F, dW1_h);
     fp16_to_fp32(dW1_h, dW1, in_dim * hid_dim);
     col_sum<<<(hid_dim + blk - 1) / blk, blk>>>(dZ1, db1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     float inv_scale = 1.0F / loss_scale;
     int n_dW2 = hid_dim * out_dim;
     int n_dW1 = in_dim * hid_dim;
     scale_kernel<<<(n_dW2 + blk - 1) / blk, blk>>>(dW2, inv_scale, n_dW2);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(n_dW1 + blk - 1) / blk, blk>>>(dW1, inv_scale, n_dW1);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_scale, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_scale, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
   }
 
@@ -374,18 +413,25 @@ struct MixedPrecisionMLP {
     int blk = 256;
     int n1 = in_dim * hid_dim, n2 = hid_dim * out_dim;
     sgd_update<<<(n1 + blk - 1) / blk, blk>>>(W1, dW1, lr, n1);
+    CUDA_CHECK(cudaGetLastError());
     sgd_update<<<(hid_dim + blk - 1) / blk, blk>>>(b1, db1, lr, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     sgd_update<<<(n2 + blk - 1) / blk, blk>>>(W2, dW2, lr, n2);
+    CUDA_CHECK(cudaGetLastError());
     sgd_update<<<(out_dim + blk - 1) / blk, blk>>>(b2, db2, lr, out_dim);
+    CUDA_CHECK(cudaGetLastError());
   }
 
   std::vector<int> predict_batch(const float* d_X, int B) {
     int blk = 256;
     gemm_fp32(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, A1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     gemm_fp32(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(B * out_dim + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     std::vector<float> logits(static_cast<size_t>(B) * out_dim);
     CUDA_CHECK(cudaMemcpy(logits.data(), Z2, static_cast<size_t>(B) * out_dim * sizeof(float),
@@ -729,9 +775,11 @@ TEST(MixedPrecisionTest, LossScalingRoundTrip) {
   // Scale up (simulating loss scaling).
   int blk = 256;
   scale_kernel<<<(N + blk - 1) / blk, blk>>>(d_grads, SCALE, N);
+  CUDA_CHECK(cudaGetLastError());
 
   // Scale down (un-scaling).
   scale_kernel<<<(N + blk - 1) / blk, blk>>>(d_grads, 1.0F / SCALE, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_ASSERT(cudaDeviceSynchronize());
 
   std::vector<float> h_out(N);

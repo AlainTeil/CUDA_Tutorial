@@ -8,12 +8,18 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 __global__ void scale_kernel(float* data, float factor, int n) {
@@ -26,35 +32,36 @@ static std::vector<float> run_streams(int n, float factor, int num_streams) {
   size_t bytes = static_cast<size_t>(n) * sizeof(float);
 
   float* h_data = nullptr;
-  cudaMallocHost(&h_data, bytes);
+  CUDA_CHECK(cudaMallocHost(&h_data, bytes));
   for (int i = 0; i < n; ++i) h_data[i] = static_cast<float>(i);
 
   float* d_data = nullptr;
-  cudaMalloc(&d_data, bytes);
+  CUDA_CHECK(cudaMalloc(&d_data, bytes));
 
   int chunk_size = (n + num_streams - 1) / num_streams;
   std::vector<cudaStream_t> streams(static_cast<size_t>(num_streams));
-  for (auto& s : streams) cudaStreamCreate(&s);
+  for (auto& s : streams) CUDA_CHECK(cudaStreamCreate(&s));
 
   for (int i = 0; i < num_streams; ++i) {
     int offset = i * chunk_size;
     int size = (offset + chunk_size <= n) ? chunk_size : (n - offset);
     if (size <= 0) break;
     size_t cb = static_cast<size_t>(size) * sizeof(float);
-    cudaMemcpyAsync(d_data + offset, h_data + offset, cb, cudaMemcpyHostToDevice,
-                    streams[static_cast<size_t>(i)]);
+    CUDA_CHECK(cudaMemcpyAsync(d_data + offset, h_data + offset, cb, cudaMemcpyHostToDevice,
+                               streams[static_cast<size_t>(i)]));
     scale_kernel<<<(size + 255) / 256, 256, 0, streams[static_cast<size_t>(i)]>>>(d_data + offset,
                                                                                   factor, size);
-    cudaMemcpyAsync(h_data + offset, d_data + offset, cb, cudaMemcpyDeviceToHost,
-                    streams[static_cast<size_t>(i)]);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpyAsync(h_data + offset, d_data + offset, cb, cudaMemcpyDeviceToHost,
+                               streams[static_cast<size_t>(i)]));
   }
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> result(h_data, h_data + n);
 
-  for (auto& s : streams) cudaStreamDestroy(s);
-  cudaFree(d_data);
-  cudaFreeHost(h_data);
+  for (auto& s : streams) CUDA_CHECK(cudaStreamDestroy(s));
+  CUDA_CHECK(cudaFree(d_data));
+  CUDA_CHECK(cudaFreeHost(h_data));
   return result;
 }
 

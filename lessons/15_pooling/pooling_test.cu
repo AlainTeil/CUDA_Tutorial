@@ -6,13 +6,19 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
 
-#define CUDA_CHECK(call)                                                           \
-  do {                                                                             \
-    cudaError_t err_ = (call);                                                     \
-    if (err_ != cudaSuccess) FAIL() << "CUDA error: " << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 // Kernel definitions (self-contained for single-TU compilation) ---------------
@@ -114,6 +120,7 @@ TEST_P(MaxPoolTest, Forward) {
   CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), h_in.size() * sizeof(float), cudaMemcpyHostToDevice));
 
   maxpool_forward<<<pool_grid(OH, OW), kBlock>>>(d_in, d_out, d_idx, H, W, ph, pw, stride);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(static_cast<size_t>(OH) * OW);
@@ -161,6 +168,7 @@ TEST_P(MaxPoolTest, Backward) {
 
   // Forward (to compute indices)
   maxpool_forward<<<pool_grid(OH, OW), kBlock>>>(d_in, d_out, d_idx, H, W, ph, pw, stride);
+  CUDA_CHECK(cudaGetLastError());
 
   // All-ones upstream gradient
   std::vector<float> h_grad_out(out_size, 1.0F);
@@ -170,6 +178,7 @@ TEST_P(MaxPoolTest, Backward) {
   int bsz = 256;
   int nblk = (static_cast<int>(out_size) + bsz - 1) / bsz;
   maxpool_backward<<<nblk, bsz>>>(d_grad_out, d_idx, d_grad_in, static_cast<int>(out_size));
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_grad_in(in_size);
@@ -207,6 +216,7 @@ TEST_P(AvgPoolTest, Forward) {
   CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), in_size * sizeof(float), cudaMemcpyHostToDevice));
 
   avgpool_forward<<<pool_grid(OH, OW), kBlock>>>(d_in, d_out, H, W, ph, pw, stride);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(out_size);
@@ -255,6 +265,7 @@ TEST_P(AvgPoolTest, BackwardGradientCheck) {
       cudaMemcpy(d_grad_out, h_grad_out.data(), out_size * sizeof(float), cudaMemcpyHostToDevice));
 
   avgpool_backward<<<pool_grid(OH, OW), kBlock>>>(d_grad_out, d_grad_in, H, W, ph, pw, stride);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_grad_in(in_size);
@@ -273,6 +284,7 @@ TEST_P(AvgPoolTest, BackwardGradientCheck) {
       cudaMalloc(&d_otmp, out_size * sizeof(float));
       cudaMemcpy(d_tmp, inp.data(), in_size * sizeof(float), cudaMemcpyHostToDevice);
       avgpool_forward<<<pool_grid(OH, OW), kBlock>>>(d_tmp, d_otmp, H, W, ph, pw, stride);
+      CUDA_CHECK(cudaGetLastError());
       cudaDeviceSynchronize();
       std::vector<float> otmp(out_size);
       cudaMemcpy(otmp.data(), d_otmp, out_size * sizeof(float), cudaMemcpyDeviceToHost);

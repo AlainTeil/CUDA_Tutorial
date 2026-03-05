@@ -6,13 +6,19 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 constexpr int kBlockSize = 256;
@@ -54,17 +60,20 @@ static void gpu_exclusive_scan(float* d_data, int n) {
   int blocks = (n + kBlockSize - 1) / kBlockSize;
   if (blocks == 1) {
     blelloch_scan_block<<<1, kBlockSize>>>(d_data, nullptr, n);
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
     return;
   }
   float* d_bs = nullptr;
-  cudaMalloc(&d_bs, static_cast<size_t>(blocks) * sizeof(float));
+  CUDA_CHECK(cudaMalloc(&d_bs, static_cast<size_t>(blocks) * sizeof(float)));
   blelloch_scan_block<<<blocks, kBlockSize>>>(d_data, d_bs, n);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
   gpu_exclusive_scan(d_bs, blocks);
   add_block_sums<<<blocks, kBlockSize>>>(d_data, d_bs, n);
-  cudaDeviceSynchronize();
-  cudaFree(d_bs);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaFree(d_bs));
 }
 
 // ---- Helper -----------------------------------------------------------------
@@ -73,12 +82,12 @@ static std::vector<float> run_scan(const std::vector<float>& input) {
   int n = static_cast<int>(input.size());
   size_t bytes = input.size() * sizeof(float);
   float* d = nullptr;
-  cudaMalloc(&d, bytes);
-  cudaMemcpy(d, input.data(), bytes, cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d, bytes));
+  CUDA_CHECK(cudaMemcpy(d, input.data(), bytes, cudaMemcpyHostToDevice));
   gpu_exclusive_scan(d, n);
   std::vector<float> result(input.size());
-  cudaMemcpy(result.data(), d, bytes, cudaMemcpyDeviceToHost);
-  cudaFree(d);
+  CUDA_CHECK(cudaMemcpy(result.data(), d, bytes, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaFree(d));
   return result;
 }
 

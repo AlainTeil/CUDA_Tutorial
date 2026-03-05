@@ -6,12 +6,18 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 // ============================================================================
@@ -48,6 +54,7 @@ TEST_P(VectorAddTest, CorrectSum) {
   int threads = 256;
   int blocks = (n + threads - 1) / threads;
   vector_add_global<<<blocks, threads>>>(da, db, dc, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(hc.data(), dc, bytes, cudaMemcpyDeviceToHost));
 
@@ -91,6 +98,7 @@ TEST(ConstantMemoryTest, PolynomialEval) {
   CUDA_CHECK(cudaMemcpy(dx, hx.data(), bytes, cudaMemcpyHostToDevice));
 
   poly_eval_constant<<<(kN + 255) / 256, 256>>>(dx, dy, kN);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
   CUDA_CHECK(cudaMemcpy(hy.data(), dy, bytes, cudaMemcpyDeviceToHost));
 
@@ -145,6 +153,7 @@ TEST_P(StencilTest, ThreePointAverage) {
   CUDA_CHECK(cudaMemcpy(din, hin.data(), bytes, cudaMemcpyHostToDevice));
 
   stencil_shared<<<(n + kStencilBlock - 1) / kStencilBlock, kStencilBlock>>>(din, dout, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> hout(static_cast<size_t>(n));

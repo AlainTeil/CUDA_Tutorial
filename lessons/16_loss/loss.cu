@@ -39,11 +39,17 @@
 // MSE loss:  L = (1/N) * sum_i (pred_i - target_i)^2
 // =============================================================================
 
-/// Forward: writes per-element squared diff.  A separate reduce-sum kernel
-/// (or host-side sum) totals them and divides by N.
-///
-/// MSE is the go-to loss for regression (predicting continuous values).
-/// It penalises large errors quadratically, making it sensitive to outliers.
+/**
+ * @brief MSE forward: compute per-element squared difference (pred − target)².
+ *
+ * Writes per-element squared differences.  A separate reduce-sum kernel
+ * totals them and divides by N to complete the mean.
+ *
+ * @param pred    Predicted values [N]
+ * @param target  Ground-truth values [N]
+ * @param diff_sq Output per-element squared differences [N]
+ * @param N       Number of elements
+ */
 __global__ void mse_forward(const float* pred, const float* target, float* diff_sq, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) {
@@ -52,10 +58,17 @@ __global__ void mse_forward(const float* pred, const float* target, float* diff_
   }
 }
 
-/// Backward:  dL/dpred_i = (2/N) * (pred_i - target_i)
-///
-/// This is a simple element-wise gradient — each prediction’s gradient
-/// depends only on its own error, making MSE embarrassingly parallel.
+/**
+ * @brief MSE backward: compute gradient dL/dpred = 2(pred − target) / N.
+ *
+ * Element-wise gradient — each prediction's gradient depends only on its
+ * own error, making MSE embarrassingly parallel.
+ *
+ * @param pred   Predicted values [N]
+ * @param target Ground-truth values [N]
+ * @param grad   Output gradient w.r.t. predictions [N]
+ * @param N      Number of elements
+ */
 __global__ void mse_backward(const float* pred, const float* target, float* grad, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) {
@@ -68,20 +81,17 @@ __global__ void mse_backward(const float* pred, const float* target, float* grad
 // Cross-Entropy loss (labels): L = -sum_i target_i * log_softmax_i
 // =============================================================================
 
-/// Numerically stable log-softmax using the "subtract-max" trick.
-///
-/// Naïvely computing  log(exp(x_i) / Σ exp(x_j))  overflows when any x_j
-/// is large (e.g. 90 → exp(90) ≈ 1.2e39, above FP32 max ≈ 3.4e38).
-///
-/// The identity  softmax(x) = softmax(x − c)  for any constant c lets us
-/// pick c = max(x).  After subtraction the largest exponent is exp(0) = 1,
-/// so no term overflows.  We then compute:
-///     log_softmax_i = (x_i − max) − log(Σ exp(x_j − max))
-///
-/// Implementation note: this kernel uses **shared-memory parallel
-/// reductions** to find the max and the sum.  blockDim.x must be a
-/// power-of-two ≥ N.  Threads with tid ≥ N contribute a sentinel (−1e30
-/// for max, 0 for sum) so the reduction stays correct.
+/**
+ * @brief Numerically stable log-softmax using the subtract-max trick.
+ *
+ * Computes log_softmax_i = (x_i − max) − log(Σ exp(x_j − max)) using
+ * shared-memory parallel reductions.  blockDim.x must be a power-of-two
+ * ≥ N; out-of-range threads contribute sentinels so reductions stay correct.
+ *
+ * @param logits Input raw logits [N]
+ * @param log_sm Output log-softmax values [N]
+ * @param N      Number of classes
+ */
 __global__ void log_softmax(const float* logits, float* log_sm, int N) {
   // Single-block kernel — N is the number of classes (typically small).
   extern __shared__ float sdata[];
@@ -119,12 +129,18 @@ __global__ void log_softmax(const float* logits, float* log_sm, int N) {
   }
 }
 
-/// Cross-entropy forward: L = -Σ target_i · log_softmax_i
-///
-/// For one-hot targets only the true-class term survives, but writing it
-/// as a dot product keeps the kernel general (e.g. label smoothing).
-///
-/// Produces per-element losses; a reduce-sum kernel totals them.
+/**
+ * @brief Cross-entropy forward: compute per-element loss −target · log_softmax.
+ *
+ * For one-hot targets only the true-class term survives, but the dot-product
+ * form keeps the kernel general (e.g. label smoothing).  A reduce-sum
+ * kernel totals the per-element losses.
+ *
+ * @param log_sm    Log-softmax values [N]
+ * @param target    Target distribution [N]
+ * @param elem_loss Output per-element losses [N]
+ * @param N         Number of classes
+ */
 __global__ void cross_entropy_forward(const float* log_sm, const float* target, float* elem_loss,
                                       int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -133,14 +149,17 @@ __global__ void cross_entropy_forward(const float* log_sm, const float* target, 
   }
 }
 
-/// Cross-entropy backward (combined with softmax):
-///    dL/d(logit_i) = softmax_i − target_i
-///
-/// This remarkably simple gradient is the reason softmax + CE are always
-/// used together.  The derivation uses the quotient rule on softmax and
-/// the chain rule through −log; most terms cancel, leaving softmax − target.
-///
-/// Since we stored log_softmax, we recover softmax as exp(log_sm[i]).
+/**
+ * @brief Cross-entropy backward: dL/d(logit) = softmax − target.
+ *
+ * Recovers softmax from stored log-softmax via exp(log_sm).  The simple
+ * gradient form is why softmax + CE are always used together.
+ *
+ * @param log_sm Log-softmax values [N]
+ * @param target Target distribution [N]
+ * @param grad   Output gradient w.r.t. logits [N]
+ * @param N      Number of classes
+ */
 __global__ void cross_entropy_backward(const float* log_sm, const float* target, float* grad,
                                        int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -153,11 +172,16 @@ __global__ void cross_entropy_backward(const float* log_sm, const float* target,
 // Simple reduce-sum helper (single block)
 // =============================================================================
 
-/// Sums N floats using a shared-memory tree reduction.  Returns the result
-/// in out[0].  This is kept as a separate kernel so the per-element loss
-/// computation and the summation can be launched independently — a common
-/// pattern in GPU programming where we prefer many simple kernels over one
-/// complex monolithic kernel.
+/**
+ * @brief Parallel sum reduction for loss aggregation.
+ *
+ * Sums N floats using a shared-memory tree reduction and writes the
+ * result to out[0].  Single-block kernel; blockDim.x must be ≥ N.
+ *
+ * @param in  Input array to sum [N]
+ * @param out Output scalar (single element)
+ * @param N   Number of elements to sum
+ */
 __global__ void reduce_sum(const float* in, float* out, int N) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -201,8 +225,11 @@ int main() {
 
   log_softmax<<<1, blockSize, static_cast<size_t>(blockSize) * sizeof(float)>>>(d_logits, d_log_sm,
                                                                                 N);
+  CUDA_CHECK(cudaGetLastError());
   cross_entropy_forward<<<1, N>>>(d_log_sm, d_target, d_elem, N);
+  CUDA_CHECK(cudaGetLastError());
   reduce_sum<<<1, blockSize, static_cast<size_t>(blockSize) * sizeof(float)>>>(d_elem, d_loss, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   float h_loss;
@@ -210,6 +237,7 @@ int main() {
   std::printf("Cross-entropy loss: %.6f\n", static_cast<double>(h_loss));
 
   cross_entropy_backward<<<1, N>>>(d_log_sm, d_target, d_grad, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_grad(N);

@@ -6,13 +6,19 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 constexpr int kBlockSize = 256;
@@ -57,16 +63,17 @@ template <typename Kernel>
 static float gpu_reduce(const float* d_in, int n, Kernel kernel) {
   int blocks = (n + kBlockSize - 1) / kBlockSize;
   float* d_out = nullptr;
-  cudaMalloc(&d_out, static_cast<size_t>(blocks) * sizeof(float));
+  CUDA_CHECK(cudaMalloc(&d_out, static_cast<size_t>(blocks) * sizeof(float)));
   kernel<<<blocks, kBlockSize>>>(d_in, d_out, n);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
   float result;
   if (blocks == 1) {
-    cudaMemcpy(&result, d_out, sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&result, d_out, sizeof(float), cudaMemcpyDeviceToHost));
   } else {
     result = gpu_reduce(d_out, blocks, kernel);
   }
-  cudaFree(d_out);
+  CUDA_CHECK(cudaFree(d_out));
   return result;
 }
 

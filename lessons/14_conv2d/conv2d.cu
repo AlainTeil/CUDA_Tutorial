@@ -63,23 +63,25 @@
 // Direct 2D convolution kernel
 // =============================================================================
 
-/// @brief Direct convolution: one thread per output pixel.
-///
-/// Each thread iterates over the KH×KW kernel window, accumulating a dot
-/// product.  The input read pattern is a 2-D sliding window, which means
-/// consecutive threads read nearby but not perfectly coalesced addresses.
-/// For small kernels (3×3, 5×5) the L1/L2 cache system mitigates this.
-///
-/// Grid mapping: 2-D — blockIdx.x covers output columns, blockIdx.y covers
-/// output rows (same pattern as Lesson 15 pooling).
-///
-/// @param in      Input image (H × W)
-/// @param kernel  Convolution kernel (KH × KW)
-/// @param out     Output image (OH × OW), OH = H-KH+1, OW = W-KW+1
-/// @param H       Input height
-/// @param W       Input width
-/// @param KH      Kernel height
-/// @param KW      Kernel width
+/**
+ * @brief Direct convolution: one thread per output pixel.
+ *
+ * Each thread iterates over the KH×KW kernel window, accumulating a dot
+ * product.  The input read pattern is a 2-D sliding window, which means
+ * consecutive threads read nearby but not perfectly coalesced addresses.
+ * For small kernels (3×3, 5×5) the L1/L2 cache system mitigates this.
+ *
+ * Grid mapping: 2-D — blockIdx.x covers output columns, blockIdx.y covers
+ * output rows (same pattern as Lesson 15 pooling).
+ *
+ * @param in      Input image (H × W)
+ * @param kernel  Convolution kernel (KH × KW)
+ * @param out     Output image (OH × OW), OH = H-KH+1, OW = W-KW+1
+ * @param H       Input height
+ * @param W       Input width
+ * @param KH      Kernel height
+ * @param KW      Kernel width
+ */
 __global__ void conv2d_direct(const float* in, const float* kernel, float* out, int H, int W,
                               int KH, int KW) {
   int OH = H - KH + 1;
@@ -120,6 +122,13 @@ __global__ void conv2d_direct(const float* in, const float* kernel, float* out, 
  *   result has shape (1, OH*OW) = the flattened output.
  *
  * Each thread handles one output position (all KH*KW kernel elements).
+ *
+ * @param in   Input image (H × W)
+ * @param col  Output column matrix (KH*KW × OH*OW)
+ * @param H    Input height
+ * @param W    Input width
+ * @param KH   Kernel height
+ * @param KW   Kernel width
  */
 __global__ void im2col_kernel(const float* in, float* col, int H, int W, int KH, int KW) {
   int OH = H - KH + 1;
@@ -179,6 +188,7 @@ int main() {
   dim3 threads(16, 16);
   dim3 blocks((OW + 15) / 16, (OH + 15) / 16);
   conv2d_direct<<<blocks, threads>>>(d_in, d_kernel, d_out, H, W, KH, KW);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   CUDA_CHECK(cudaMemcpy(h_out.data(), d_out, OH * OW * sizeof(float), cudaMemcpyDeviceToHost));

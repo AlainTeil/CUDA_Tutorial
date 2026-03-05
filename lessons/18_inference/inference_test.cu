@@ -12,15 +12,20 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <random>
 #include <string>
 #include <vector>
 
-#define CUDA_CHECK(call)                                                           \
-  do {                                                                             \
-    cudaError_t err_ = (call);                                                     \
-    if (err_ != cudaSuccess) FAIL() << "CUDA error: " << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 #define CUDA_ASSERT(call)                                                 \
@@ -213,11 +218,17 @@ struct InferenceMLP {
     int bp = 1;
     while (bp < out_dim) bp <<= 1;
     dense_fwd<<<1, hid_dim>>>(d_x, W1, b1, z1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<1, hid_dim>>>(z1, a1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_fwd<<<1, out_dim>>>(a1, W2, b2, z2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     log_softmax_k2<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(z2, log_sm, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     ce_fwd<<<1, out_dim>>>(log_sm, d_target, elem_loss, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     reduce_sum_k2<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(elem_loss, d_loss, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_ASSERT(cudaDeviceSynchronize());
     float h_loss;
     CUDA_ASSERT(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
@@ -226,12 +237,17 @@ struct InferenceMLP {
 
   void backward(const float* d_x, const float* d_target) {
     ce_bwd<<<1, out_dim>>>(log_sm, d_target, dz2, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_bwd_dW<<<1, hid_dim * out_dim>>>(a1, dz2, dW2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpy(db2, dz2, static_cast<size_t>(out_dim) * sizeof(float),
                           cudaMemcpyDeviceToDevice));
     dense_bwd_dX<<<1, hid_dim>>>(dz2, W2, da1, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_bwd<<<1, hid_dim>>>(z1, da1, dz1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_bwd_dW<<<1, in_dim * hid_dim>>>(d_x, dz1, dW1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpy(db1, dz1, static_cast<size_t>(hid_dim) * sizeof(float),
                           cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -240,6 +256,7 @@ struct InferenceMLP {
   void sgd_step(float lr) {
     auto upd = [lr](float* p, const float* g, int n) {
       sgd_upd<<<(n + 255) / 256, 256>>>(p, g, lr, n);
+      CUDA_CHECK(cudaGetLastError());
     };
     upd(W1, dW1, in_dim * hid_dim);
     upd(b1, db1, hid_dim);
@@ -250,8 +267,11 @@ struct InferenceMLP {
 
   [[nodiscard]] int predict(const float* d_x) {
     dense_fwd<<<1, hid_dim>>>(d_x, W1, b1, z1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<1, hid_dim>>>(z1, a1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_fwd<<<1, out_dim>>>(a1, W2, b2, z2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_ASSERT(cudaDeviceSynchronize());
     std::vector<float> h_z(static_cast<size_t>(out_dim));
     CUDA_ASSERT(cudaMemcpy(h_z.data(), z2, static_cast<size_t>(out_dim) * sizeof(float),

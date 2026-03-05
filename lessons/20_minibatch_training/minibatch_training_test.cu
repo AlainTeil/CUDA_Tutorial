@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <random>
@@ -26,10 +28,14 @@
 // Error-checking macros
 // =============================================================================
 
-#define CUDA_CHECK(call)                                                           \
-  do {                                                                             \
-    cudaError_t err_ = (call);                                                     \
-    if (err_ != cudaSuccess) FAIL() << "CUDA error: " << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 #define CUDA_ASSERT(call)                                                 \
@@ -41,10 +47,14 @@
     }                                                                     \
   } while (0)
 
-#define CUBLAS_CHECK(call)                                                                 \
-  do {                                                                                     \
-    cublasStatus_t st_ = (call);                                                           \
-    if (st_ != CUBLAS_STATUS_SUCCESS) FAIL() << "cuBLAS error: " << static_cast<int>(st_); \
+#define CUBLAS_CHECK(call)                                                    \
+  do {                                                                        \
+    cublasStatus_t st_ = (call);                                              \
+    if (st_ != CUBLAS_STATUS_SUCCESS) {                                       \
+      std::fprintf(stderr, "cuBLAS error at %s:%d: %d\n", __FILE__, __LINE__, \
+                   static_cast<int>(st_));                                    \
+      std::abort();                                                           \
+    }                                                                         \
   } while (0)
 
 #define CUBLAS_ASSERT(call)                                                   \
@@ -218,17 +228,23 @@ struct BatchMLP {
     int blk = 256;
     gemm_rm(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(total1 + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(total1 + blk - 1) / blk, blk>>>(Z1, A1, total1);
+    CUDA_CHECK(cudaGetLastError());
     gemm_rm(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(total2 + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     int sm_block = 1;
     while (sm_block < out_dim) sm_block <<= 1;
     batch_log_softmax<<<B, sm_block, static_cast<size_t>(sm_block) * sizeof(float)>>>(Z2, LS,
                                                                                       out_dim);
+    CUDA_CHECK(cudaGetLastError());
     ce_fwd<<<(total2 + blk - 1) / blk, blk>>>(LS, d_target, elem_loss, total2);
+    CUDA_CHECK(cudaGetLastError());
     int red_block = 256;
     reduce_sum_all<<<1, red_block, static_cast<size_t>(red_block) * sizeof(float)>>>(
         elem_loss, d_loss, total2);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_ASSERT(cudaDeviceSynchronize());
     float h_loss;
     CUDA_ASSERT(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
@@ -241,18 +257,24 @@ struct BatchMLP {
     int blk = 256;
     float inv_B = 1.0F / static_cast<float>(B);
     ce_bwd<<<(total2 + blk - 1) / blk, blk>>>(LS, d_target, dZ2, total2);
+    CUDA_CHECK(cudaGetLastError());
     gemm_rm_AT(cublas, hid_dim, B, out_dim, inv_B, A1, dZ2, 0.0F, dW2);
     col_sum<<<(out_dim + blk - 1) / blk, blk>>>(dZ2, db2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     {
       float one = 1.0F, zero = 0.0F;
       CUBLAS_ASSERT(cublasSgemm(cublas, CUBLAS_OP_T, CUBLAS_OP_N, hid_dim, B, out_dim, &one, W2,
                                 out_dim, dZ2, out_dim, &zero, dA1, hid_dim));
     }
     relu_bwd<<<(total1 + blk - 1) / blk, blk>>>(Z1, dA1, dZ1, total1);
+    CUDA_CHECK(cudaGetLastError());
     gemm_rm_AT(cublas, in_dim, B, hid_dim, inv_B, d_X, dZ1, 0.0F, dW1);
     col_sum<<<(hid_dim + blk - 1) / blk, blk>>>(dZ1, db1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_ASSERT(cudaDeviceSynchronize());
   }
 
@@ -260,6 +282,7 @@ struct BatchMLP {
     int blk = 256;
     auto upd = [&](float* p, const float* g, int n) {
       sgd_update<<<(n + blk - 1) / blk, blk>>>(p, g, lr, n);
+      CUDA_CHECK(cudaGetLastError());
     };
     upd(W1, dW1, in_dim * hid_dim);
     upd(b1, db1, hid_dim);
@@ -274,9 +297,12 @@ struct BatchMLP {
     int total2 = B * out_dim;
     gemm_rm(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(total1 + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(total1 + blk - 1) / blk, blk>>>(Z1, A1, total1);
+    CUDA_CHECK(cudaGetLastError());
     gemm_rm(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(total2 + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_ASSERT(cudaDeviceSynchronize());
     std::vector<float> h_z(static_cast<size_t>(total2));
     CUDA_ASSERT(cudaMemcpy(h_z.data(), Z2, static_cast<size_t>(total2) * sizeof(float),
@@ -368,6 +394,7 @@ TEST(MiniBatchTest, DenseForwardMatchesCPU) {
   gemm_rm(handle, B, IN, OUT, 1.0F, d_X, d_W, 0.0F, d_Y);
   int total = B * OUT;
   add_bias<<<(total + 255) / 256, 256>>>(d_Y, d_b, B, OUT);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_Y_gpu(B * OUT);
@@ -404,6 +431,7 @@ TEST(MiniBatchTest, BatchLogSoftmaxValid) {
   int block = 1;
   while (block < C) block <<= 1;
   batch_log_softmax<<<B, block, static_cast<size_t>(block) * sizeof(float)>>>(d_logits, d_ls, C);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_ls(B * C);
@@ -440,6 +468,7 @@ TEST(MiniBatchTest, ColSumCorrect) {
   CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), B * D * sizeof(float), cudaMemcpyHostToDevice));
 
   col_sum<<<1, D>>>(d_in, d_out, B, D);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(D);
@@ -665,6 +694,7 @@ TEST(MiniBatchTest, ReduceSumAll) {
   CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), N * sizeof(float), cudaMemcpyHostToDevice));
 
   reduce_sum_all<<<1, 256, 256 * sizeof(float)>>>(d_in, d_out, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   float h_out;

@@ -49,11 +49,19 @@
 // Kernels (self-contained for this lesson)
 // =============================================================================
 
-/// Dense (fully-connected) forward:  Y = X · W + b
-///
-/// For a single sample:  X is [1×in_dim], W is [in_dim×out_dim], Y is [1×out_dim].
-/// Each thread computes one output neuron by dot-producting X with a column
-/// of W and adding the bias.  This is essentially a matrix-vector multiply.
+/**
+ * @brief Dense (fully-connected) forward: Y = X · W + b (see Lesson 12).
+ *
+ * Each thread computes one output neuron by dot-producting X with a column
+ * of W and adding the bias.
+ *
+ * @param X        Input activations (device pointer, length in_dim).
+ * @param W        Weight matrix in row-major order (device pointer, in_dim × out_dim).
+ * @param b        Bias vector (device pointer, length out_dim).
+ * @param Y        Output activations (device pointer, length out_dim).
+ * @param in_dim   Number of input features.
+ * @param out_dim  Number of output neurons.
+ */
 __global__ void dense_forward(const float* X, const float* W, const float* b, float* Y, int in_dim,
                               int out_dim) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;  // output neuron index
@@ -64,10 +72,17 @@ __global__ void dense_forward(const float* X, const float* W, const float* b, fl
   }
 }
 
-/// Dense backward — gradient w.r.t. input X:
-///   dX = dY · W^T
-/// Each thread computes one element of dX by dot-producting dY with a row of W.
-/// (A row of W corresponds to all the weights leaving input i.)
+/**
+ * @brief Dense backward — gradient w.r.t. input: dX = dY · W^T (see Lesson 12).
+ *
+ * Each thread computes one element of dX by dot-producting dY with a row of W.
+ *
+ * @param dY       Upstream gradient (device pointer, length out_dim).
+ * @param W        Weight matrix (device pointer, in_dim × out_dim).
+ * @param dX       Output gradient w.r.t. input (device pointer, length in_dim).
+ * @param in_dim   Number of input features.
+ * @param out_dim  Number of output neurons.
+ */
 __global__ void dense_backward_dX(const float* dY, const float* W, float* dX, int in_dim,
                                   int out_dim) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;  // input neuron index
@@ -78,9 +93,17 @@ __global__ void dense_backward_dX(const float* dY, const float* W, float* dX, in
   }
 }
 
-/// Dense backward — gradient w.r.t. weights W:
-///   dW = X^T · dY   (outer product for a single sample)
-/// Each thread handles one element dW[i][j] = X[i] * dY[j].
+/**
+ * @brief Dense backward — gradient w.r.t. weights: dW = X^T · dY (see Lesson 12).
+ *
+ * Each thread handles one element dW[i][j] = X[i] * dY[j].
+ *
+ * @param X        Input activations (device pointer, length in_dim).
+ * @param dY       Upstream gradient (device pointer, length out_dim).
+ * @param dW       Weight gradient output (device pointer, in_dim × out_dim).
+ * @param in_dim   Number of input features.
+ * @param out_dim  Number of output neurons.
+ */
 __global__ void dense_backward_dW(const float* X, const float* dY, float* dW, int in_dim,
                                   int out_dim) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -91,23 +114,38 @@ __global__ void dense_backward_dW(const float* X, const float* dY, float* dW, in
   }
 }
 
-/// ReLU forward: out = max(0, in).
-/// ReLU is the most common activation because it is cheap to compute,
-/// provides non-linearity, and avoids the vanishing-gradient problem
-/// that plagues sigmoid/tanh in deep networks.
+/**
+ * @brief ReLU forward: out = max(0, in) (see Lesson 13).
+ *
+ * @param in   Input activations (device pointer, length N).
+ * @param out  Output activations (device pointer, length N).
+ * @param N    Number of elements.
+ */
 __global__ void relu_forward(const float* in, float* out, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) out[i] = (in[i] > 0.0F) ? in[i] : 0.0F;
 }
 
-/// ReLU backward: gradient passes through unchanged where the input was
-/// positive, and is zeroed where the input was ≤ 0 (“dead zone”).
+/**
+ * @brief ReLU backward: gradient passes through where input > 0 (see Lesson 13).
+ *
+ * @param in        Pre-activation values (device pointer, length N).
+ * @param grad_out  Upstream gradient (device pointer, length N).
+ * @param grad_in   Output gradient w.r.t. input (device pointer, length N).
+ * @param N         Number of elements.
+ */
 __global__ void relu_backward(const float* in, const float* grad_out, float* grad_in, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) grad_in[i] = (in[i] > 0.0F) ? grad_out[i] : 0.0F;
 }
 
-/// Stable log-softmax (see Lesson 16 for the full derivation).
+/**
+ * @brief Numerically stable log-softmax (see Lesson 16).
+ *
+ * @param logits  Input logits (device pointer, length N).
+ * @param log_sm  Output log-softmax values (device pointer, length N).
+ * @param N       Number of classes.
+ */
 __global__ void log_softmax_k(const float* logits, float* log_sm, int N) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -131,20 +169,39 @@ __global__ void log_softmax_k(const float* logits, float* log_sm, int N) {
   if (tid < N) log_sm[tid] = (val - mx) - lse;
 }
 
-/// CE forward: per-element loss = -target_i * log_softmax_i
+/**
+ * @brief Cross-entropy forward: elem[i] = -target[i] * log_sm[i] (see Lesson 16).
+ *
+ * @param log_sm  Log-softmax output (device pointer, length N).
+ * @param target  One-hot target vector (device pointer, length N).
+ * @param elem    Per-element loss output (device pointer, length N).
+ * @param N       Number of classes.
+ */
 __global__ void ce_forward_k(const float* log_sm, const float* target, float* elem, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) elem[i] = -target[i] * log_sm[i];
 }
 
-/// CE backward: the combined softmax+CE gradient = softmax_i - target_i.
-/// (See Lesson 16 for the derivation.)
+/**
+ * @brief Cross-entropy backward: grad = softmax − target (see Lesson 16).
+ *
+ * @param log_sm  Log-softmax output (device pointer, length N).
+ * @param target  One-hot target vector (device pointer, length N).
+ * @param grad    Output gradient (device pointer, length N).
+ * @param N       Number of classes.
+ */
 __global__ void ce_backward_k(const float* log_sm, const float* target, float* grad, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) grad[i] = expf(log_sm[i]) - target[i];
 }
 
-/// Reduce sum (see Lesson 16 for the shared-memory reduction pattern).
+/**
+ * @brief Shared-memory reduction sum (see Lesson 08).
+ *
+ * @param in   Input array (device pointer, length N).
+ * @param out  Scalar sum output (device pointer, single float).
+ * @param N    Number of elements.
+ */
 __global__ void reduce_sum_k(const float* in, float* out, int N) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -157,10 +214,16 @@ __global__ void reduce_sum_k(const float* in, float* out, int N) {
   if (tid == 0) *out = sdata[0];
 }
 
-/// Vanilla SGD: param -= lr * grad.
-/// The simplest optimiser — each parameter is updated independently.
-/// Modern training uses variants like Adam that maintain per-parameter
-/// running statistics, but SGD remains a solid baseline.
+/**
+ * @brief Vanilla SGD update: param[i] -= lr * grad[i].
+ *
+ * The simplest optimiser — each parameter is updated independently.
+ *
+ * @param param  Parameter array to update in-place (device pointer, length N).
+ * @param grad   Gradient array (device pointer, length N).
+ * @param lr     Learning rate.
+ * @param N      Number of parameters.
+ */
 __global__ void sgd_update(float* param, const float* grad, float lr, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) param[i] -= lr * grad[i];
@@ -170,14 +233,12 @@ __global__ void sgd_update(float* param, const float* grad, float lr, int N) {
 // MLP struct — manages the computational graph for a two-layer network
 // =============================================================================
 
-/// Encapsulates device buffers for weights, activations, and gradients.
-///
-/// The computational graph for a single forward→backward is:
-///
-///   x → [Dense1] → z1 → [ReLU] → a1 → [Dense2] → z2 → [Softmax+CE] → loss
-///
-/// Backward reverses this chain, computing gradients at each node and
-/// accumulating dW, db for each Dense layer.
+/**
+ * @brief Two-layer MLP managing device buffers for weights, activations, and gradients.
+ *
+ * The computational graph for a single forward→backward is:
+ *   x → [Dense1] → z1 → [ReLU] → a1 → [Dense2] → z2 → [Softmax+CE] → loss
+ */
 struct MLP {
   int in_dim, hid_dim, out_dim;
 
@@ -192,6 +253,7 @@ struct MLP {
   // Loss buffers (per-element and scalar).
   float *elem_loss, *d_loss;
 
+  /** @brief Allocate all device buffers for weights, activations, and gradients. */
   void alloc(int in, int hid, int out) {
     in_dim = in;
     hid_dim = hid;
@@ -219,12 +281,12 @@ struct MLP {
     CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
   }
 
-  /// He (Kaiming) initialisation:  std = sqrt(2 / fan_in).
-  ///
-  /// With ReLU, roughly half the neurons output zero, so the “effective
-  /// fan-in” is halved — the factor of 2 compensates for that.  Without
-  /// this, deep networks suffer from vanishing or exploding activations
-  /// in early training.
+  /**
+   * @brief He (Kaiming) initialisation: std = sqrt(2 / fan_in).
+   *
+   * Compensates for ReLU zeroing roughly half the neurons, keeping
+   * activations and gradients in a healthy range during early training.
+   */
   void init_weights(unsigned seed) {
     std::mt19937 gen(seed);
     auto fill = [&](float* d, int n, float scale) {
@@ -240,22 +302,28 @@ struct MLP {
     fill(b2, out_dim, 0.01F);
   }
 
-  /// Forward pass: x → Dense1 → ReLU → Dense2 → LogSoftmax → CE → loss.
-  ///
-  /// Each kernel is launched with 1 block because we process a single
-  /// sample at a time (online SGD).  In production you would batch
-  /// samples to fill the GPU’s thousands of cores.
+  /**
+   * @brief Forward pass: x → Dense1 → ReLU → Dense2 → LogSoftmax → CE → loss.
+   *
+   * Returns the scalar cross-entropy loss for a single sample.
+   */
   float forward(const float* d_x, const float* d_target) {
     // Block size for shared-memory reductions must be a power of two.
     int bp = 1;
     while (bp < out_dim) bp <<= 1;
 
     dense_forward<<<1, hid_dim>>>(d_x, W1, b1, z1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_forward<<<1, hid_dim>>>(z1, a1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_forward<<<1, out_dim>>>(a1, W2, b2, z2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     log_softmax_k<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(z2, log_sm, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     ce_forward_k<<<1, out_dim>>>(log_sm, d_target, elem_loss, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     reduce_sum_k<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(elem_loss, d_loss, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     float h_loss;
@@ -263,19 +331,21 @@ struct MLP {
     return h_loss;
   }
 
-  /// Backward pass — reverse the computational graph.
-  ///
-  /// The chain rule dictates the order: the gradient of the loss w.r.t.
-  /// a parameter deep in the network flows *backward* through every
-  /// intervening operation.  We therefore process layers from output to
-  /// input.
+  /**
+   * @brief Backward pass — reverse the computational graph.
+   *
+   * Computes gradients of the loss w.r.t. all learnable parameters
+   * using the chain rule, processing layers from output to input.
+   */
   void backward(const float* d_x, const float* d_target) {
     // ------ Output layer (Dense2) ------
     // Combined softmax+CE gradient:  dz2 = softmax(z2) - target
     ce_backward_k<<<1, out_dim>>>(log_sm, d_target, dz2, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // Weight gradient: dW2 = a1^T · dz2  (outer product, single sample)
     dense_backward_dW<<<1, hid_dim * out_dim>>>(a1, dz2, dW2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     // Bias gradient: db2 = dz2  (just copy — bias adds 1·dz2)
     CUDA_CHECK(cudaMemcpy(db2, dz2, static_cast<size_t>(out_dim) * sizeof(float),
                           cudaMemcpyDeviceToDevice));
@@ -283,12 +353,15 @@ struct MLP {
     // ------ Propagate through Dense2 to hidden layer ------
     // da1 = dz2 · W2^T  (how much each hidden neuron contributed to the error)
     dense_backward_dX<<<1, hid_dim>>>(dz2, W2, da1, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // ------ ReLU backward: zero out gradients where activation was ≤ 0 ------
     relu_backward<<<1, hid_dim>>>(z1, da1, dz1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // ------ Hidden layer (Dense1) ------
     dense_backward_dW<<<1, in_dim * hid_dim>>>(d_x, dz1, dW1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpy(db1, dz1, static_cast<size_t>(hid_dim) * sizeof(float),
                           cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -302,6 +375,7 @@ struct MLP {
   void sgd_step(float lr) {
     auto update = [lr](float* p, const float* g, int n) {
       sgd_update<<<(n + 255) / 256, 256>>>(p, g, lr, n);
+      CUDA_CHECK(cudaGetLastError());
     };
     update(W1, dW1, in_dim * hid_dim);
     update(b1, db1, hid_dim);
@@ -319,8 +393,11 @@ struct MLP {
     int bp = 1;
     while (bp < out_dim) bp <<= 1;
     dense_forward<<<1, hid_dim>>>(d_x, W1, b1, z1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_forward<<<1, hid_dim>>>(z1, a1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_forward<<<1, out_dim>>>(a1, W2, b2, z2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> h_z(static_cast<size_t>(out_dim));
@@ -329,25 +406,25 @@ struct MLP {
     return static_cast<int>(std::distance(h_z.begin(), std::max_element(h_z.begin(), h_z.end())));
   }
 
+  /** @brief Free all device-allocated buffers. */
   void free_all() {
-    cudaFree(W1);
-    cudaFree(b1);
-    cudaFree(W2);
-    cudaFree(b2);
-    cudaFree(dW1);
-    cudaFree(db1);
-    cudaFree(dW2);
-    cudaFree(db2);
-    cudaFree(z1);
-    cudaFree(a1);
-    cudaFree(z2);
-    cudaFree(log_sm);
-    cudaFree(dz2);
-    cudaFree(da1);
-    cudaFree(dz1);
-    cudaFree(dx);
-    cudaFree(elem_loss);
-    cudaFree(d_loss);
+    CUDA_CHECK(cudaFree(b1));
+    CUDA_CHECK(cudaFree(W2));
+    CUDA_CHECK(cudaFree(b2));
+    CUDA_CHECK(cudaFree(dW1));
+    CUDA_CHECK(cudaFree(db1));
+    CUDA_CHECK(cudaFree(dW2));
+    CUDA_CHECK(cudaFree(db2));
+    CUDA_CHECK(cudaFree(z1));
+    CUDA_CHECK(cudaFree(a1));
+    CUDA_CHECK(cudaFree(z2));
+    CUDA_CHECK(cudaFree(log_sm));
+    CUDA_CHECK(cudaFree(dz2));
+    CUDA_CHECK(cudaFree(da1));
+    CUDA_CHECK(cudaFree(dz1));
+    CUDA_CHECK(cudaFree(dx));
+    CUDA_CHECK(cudaFree(elem_loss));
+    CUDA_CHECK(cudaFree(d_loss));
   }
 };
 

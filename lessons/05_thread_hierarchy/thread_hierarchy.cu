@@ -99,6 +99,11 @@ __global__ void fill_2d(int* out, int rows, int cols) {
  * With a 3-D grid, every thread has a unique (x, y, z) coordinate.
  * The linearised index is `z * rows * cols + y * cols + x`, mirroring
  * how a 3-D C array `a[depth][rows][cols]` is laid out in memory.
+ *
+ * @param out    Output array (device pointer, length depth * rows * cols).
+ * @param depth  Number of slices (z-dimension).
+ * @param rows   Number of rows per slice (y-dimension).
+ * @param cols   Number of columns per row (x-dimension).
  */
 __global__ void fill_3d(int* out, int depth, int rows, int cols) {
   int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -119,6 +124,7 @@ int main() {
     int* d_out = nullptr;
     CUDA_CHECK(cudaMalloc(&d_out, static_cast<size_t>(kN) * sizeof(int)));
     fill_1d<<<(kN + 255) / 256, 256>>>(d_out, kN);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<int> h(kN);
@@ -140,6 +146,7 @@ int main() {
     dim3 threads(16, 16);
     dim3 blocks((kCols + 15) / 16, (kRows + 15) / 16);
     fill_2d<<<blocks, threads>>>(d_out, kRows, kCols);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<int> h(kTotal);
@@ -161,6 +168,7 @@ int main() {
     dim3 threads(8, 4, 2);
     dim3 blocks((kC + 7) / 8, (kR + 3) / 4, (kD + 1) / 2);
     fill_3d<<<blocks, threads>>>(d_out, kD, kR, kC);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<int> h(kTotal);

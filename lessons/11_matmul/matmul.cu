@@ -63,11 +63,20 @@ constexpr int kTile = 16;
 // Naive matmul
 // =============================================================================
 
-/// @brief Naive matmul: each thread computes one element of C.
-///
-/// Thread (row, col) reads all K elements of A[row, :] and B[:, col] from
-/// global memory.  This results in O(M*N*K) total global reads across all
-/// threads, with massive redundancy — the same row of A is read by N threads.
+/**
+ * @brief Naive matmul: each thread computes one element of C = A × B.
+ *
+ * Thread (row, col) reads all K elements of A[row, :] and B[:, col] from
+ * global memory.  This results in O(M*N*K) total global reads across all
+ * threads, with massive redundancy — the same row of A is read by N threads.
+ *
+ * @param A  Input matrix A in row-major layout (M × K).
+ * @param B  Input matrix B in row-major layout (K × N).
+ * @param C  Output matrix C in row-major layout (M × N).
+ * @param M  Number of rows in A / rows in C.
+ * @param N  Number of columns in B / columns in C.
+ * @param K  Shared (contraction) dimension: columns of A / rows of B.
+ */
 __global__ void matmul_naive(const float* A, const float* B, float* C, int M, int N, int K) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -85,18 +94,27 @@ __global__ void matmul_naive(const float* A, const float* B, float* C, int M, in
 // Tiled matmul (shared memory)
 // =============================================================================
 
-/// @brief Tiled matmul: shared-memory tiles reduce global reads by TILE×.
-///
-/// The outer loop iterates over K in steps of `kTile`.  In each step:
-///   1. Each thread loads one element of the A-tile and one of the B-tile
-///      from global memory into shared memory (coalesced).
-///   2. `__syncthreads()` ensures the tiles are fully populated.
-///   3. Each thread accumulates `kTile` multiply-adds from shared memory.
-///   4. A second `__syncthreads()` before the next iteration prevents the
-///      new tile load from overwriting data still being read.
-///
-/// This transforms O(K) global reads per thread into O(K/kTile) global
-/// reads + O(K) shared-memory reads (which are ~100× faster).
+/**
+ * @brief Tiled matmul: shared-memory tiles reduce global reads by TILE×.
+ *
+ * The outer loop iterates over K in steps of `kTile`.  In each step:
+ *   1. Each thread loads one element of the A-tile and one of the B-tile
+ *      from global memory into shared memory (coalesced).
+ *   2. `__syncthreads()` ensures the tiles are fully populated.
+ *   3. Each thread accumulates `kTile` multiply-adds from shared memory.
+ *   4. A second `__syncthreads()` before the next iteration prevents the
+ *      new tile load from overwriting data still being read.
+ *
+ * This transforms O(K) global reads per thread into O(K/kTile) global
+ * reads + O(K) shared-memory reads (which are ~100× faster).
+ *
+ * @param A  Input matrix A in row-major layout (M × K).
+ * @param B  Input matrix B in row-major layout (K × N).
+ * @param C  Output matrix C in row-major layout (M × N).
+ * @param M  Number of rows in A / rows in C.
+ * @param N  Number of columns in B / columns in C.
+ * @param K  Shared (contraction) dimension: columns of A / rows of B.
+ */
 __global__ void matmul_tiled(const float* A, const float* B, float* C, int M, int N, int K) {
   __shared__ float As[kTile][kTile];
   __shared__ float Bs[kTile][kTile];
@@ -167,6 +185,7 @@ int main() {
 
   // Naive
   matmul_naive<<<blocks, threads>>>(dA, dB, dC, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> hC_naive(static_cast<size_t>(M) * N);
@@ -174,6 +193,7 @@ int main() {
 
   // Tiled
   matmul_tiled<<<blocks, threads>>>(dA, dB, dC, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> hC_tiled(static_cast<size_t>(M) * N);

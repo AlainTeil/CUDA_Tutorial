@@ -6,12 +6,18 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 __global__ void conv2d_direct(const float* in, const float* kernel, float* out, int H, int W,
@@ -67,6 +73,7 @@ TEST_P(Conv2DTest, DirectMatchesCPU) {
   dim3 threads(16, 16);
   dim3 blocks((OW + 15) / 16, (OH + 15) / 16);
   conv2d_direct<<<blocks, threads>>>(d_in, d_k, d_out, H, W, KH, KW);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(h_ref.size());
@@ -107,6 +114,7 @@ TEST(Conv2DTest, IdentityKernel) {
   dim3 threads(16, 16);
   dim3 blocks((OW + 15) / 16, (OH + 15) / 16);
   conv2d_direct<<<blocks, threads>>>(d_in, d_k, d_out, H, W, K, K);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(static_cast<size_t>(OH) * OW);

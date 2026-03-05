@@ -1,4 +1,3 @@
-cmake_minimum_required(VERSION 3.20)
 
 add_executable(16_loss loss.cu)
 target_link_libraries(16_loss PRIVATE CUDA::cudart)

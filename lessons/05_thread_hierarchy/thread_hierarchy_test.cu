@@ -5,13 +5,19 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 // ---- Kernels ----------------------------------------------------------------
@@ -49,6 +55,7 @@ TEST_P(Fill1DTest, MatchesIota) {
   CUDA_CHECK(cudaMemset(d_out, 0xFF, static_cast<size_t>(n) * sizeof(int)));
 
   fill_1d<<<(n + 255) / 256, 256>>>(d_out, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<int> h(static_cast<size_t>(n));
@@ -83,6 +90,7 @@ TEST_P(Fill2DTest, UniqueLinearIndex) {
   dim3 threads(16, 16);
   dim3 blocks(static_cast<unsigned>((cols + 15) / 16), static_cast<unsigned>((rows + 15) / 16));
   fill_2d<<<blocks, threads>>>(d_out, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<int> h(static_cast<size_t>(total));
@@ -120,6 +128,7 @@ TEST_P(Fill3DTest, UniqueLinearIndex) {
   dim3 blocks(static_cast<unsigned>((cols + 7) / 8), static_cast<unsigned>((rows + 3) / 4),
               static_cast<unsigned>((depth + 1) / 2));
   fill_3d<<<blocks, threads>>>(d_out, depth, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<int> h(static_cast<size_t>(total));

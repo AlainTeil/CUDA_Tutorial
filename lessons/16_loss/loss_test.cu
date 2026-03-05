@@ -7,13 +7,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
 
-#define CUDA_CHECK(call)                                                           \
-  do {                                                                             \
-    cudaError_t err_ = (call);                                                     \
-    if (err_ != cudaSuccess) FAIL() << "CUDA error: " << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 // Kernel definitions (self-contained) -----------------------------------------
@@ -104,8 +110,10 @@ TEST(MSETest, ForwardValue) {
   CUDA_CHECK(cudaMemcpy(d_target, h_target.data(), N * sizeof(float), cudaMemcpyHostToDevice));
 
   mse_forward<<<1, N>>>(d_pred, d_target, d_diff, N);
+  CUDA_CHECK(cudaGetLastError());
   int bp = next_pow2(N);
   reduce_sum<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(d_diff, d_loss, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   float h_sum;
@@ -138,6 +146,7 @@ TEST(MSETest, BackwardGradientCheck) {
   CUDA_CHECK(cudaMemcpy(d_target, h_target.data(), N * sizeof(float), cudaMemcpyHostToDevice));
 
   mse_backward<<<1, N>>>(d_pred, d_target, d_grad, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_grad(N);
@@ -181,6 +190,7 @@ TEST(LogSoftmaxTest, Properties) {
 
   int bp = next_pow2(N);
   log_softmax<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(d_in, d_out, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(N);
@@ -219,8 +229,11 @@ TEST(CrossEntropyTest, KnownValue) {
 
   int bp = next_pow2(N);
   log_softmax<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(d_logits, d_log_sm, N);
+  CUDA_CHECK(cudaGetLastError());
   cross_entropy_forward<<<1, N>>>(d_log_sm, d_target, d_elem, N);
+  CUDA_CHECK(cudaGetLastError());
   reduce_sum<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(d_elem, d_loss, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   float h_loss;
@@ -253,7 +266,9 @@ TEST(CrossEntropyTest, BackwardGradientCheck) {
 
   int bp = next_pow2(N);
   log_softmax<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(d_logits, d_log_sm, N);
+  CUDA_CHECK(cudaGetLastError());
   cross_entropy_backward<<<1, N>>>(d_log_sm, d_target, d_grad, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_grad(N);

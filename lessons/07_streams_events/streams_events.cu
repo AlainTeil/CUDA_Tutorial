@@ -54,6 +54,16 @@
 // Kernel: element-wise multiply by a scalar
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Scale array elements by a constant factor: data[i] *= factor.
+ *
+ * Used in this lesson to demonstrate overlapping H→D copies, kernel
+ * execution, and D→H copies across multiple CUDA streams.
+ *
+ * @param data    Array to scale in-place (device pointer, length n).
+ * @param factor  Scalar multiplier.
+ * @param n       Number of elements.
+ */
 __global__ void scale_kernel(float* data, float factor, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) data[idx] *= factor;
@@ -79,6 +89,7 @@ float run_serial(float* h_data, float* d_data, int n, float factor) {
   CUDA_CHECK(cudaEventRecord(start));
   CUDA_CHECK(cudaMemcpy(d_data, h_data, bytes, cudaMemcpyHostToDevice));
   scale_kernel<<<blocks, threads>>>(d_data, factor, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaMemcpy(h_data, d_data, bytes, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaEventRecord(stop));
   CUDA_CHECK(cudaEventSynchronize(stop));
@@ -130,6 +141,7 @@ float run_concurrent(float* h_data, float* d_data, int n, float factor, int num_
                                cudaMemcpyHostToDevice, streams[static_cast<size_t>(i)]));
     scale_kernel<<<blocks, threads, 0, streams[static_cast<size_t>(i)]>>>(d_data + offset, factor,
                                                                           size);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpyAsync(h_data + offset, d_data + offset, chunk_bytes,
                                cudaMemcpyDeviceToHost, streams[static_cast<size_t>(i)]));
   }

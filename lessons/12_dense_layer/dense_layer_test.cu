@@ -8,13 +8,18 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 constexpr int kTile = 16;
@@ -66,12 +71,14 @@ static void gpu_matmul(const float* dA, const float* dB, float* dC, int M, int N
   dim3 threads(kTile, kTile);
   dim3 blocks((N + kTile - 1) / kTile, (M + kTile - 1) / kTile);
   matmul_kernel<<<blocks, threads>>>(dA, dB, dC, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 static void gpu_transpose(const float* d_in, float* d_out, int rows, int cols) {
   dim3 threads(kTile, kTile);
   dim3 blocks((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
   transpose_kernel<<<blocks, threads>>>(d_in, d_out, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 static void dense_forward(const float* dX, const float* dW, const float* db, float* dY, int batch,
@@ -80,6 +87,7 @@ static void dense_forward(const float* dX, const float* dW, const float* db, flo
   dim3 threads(kTile, kTile);
   dim3 blocks((out_dim + kTile - 1) / kTile, (batch + kTile - 1) / kTile);
   add_bias<<<blocks, threads>>>(dY, db, batch, out_dim);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 static void dense_backward(const float* dX, const float* dW, const float* dY_grad, float* dX_grad,
@@ -95,6 +103,7 @@ static void dense_backward(const float* dX, const float* dW, const float* dY_gra
   gpu_matmul(dXt, dY_grad, dW_grad, in_dim, out_dim, batch);
 
   bias_grad<<<(out_dim + 255) / 256, 256>>>(dY_grad, db_grad, batch, out_dim);
+  CUDA_CHECK(cudaGetLastError());
 
   cudaFree(dWt);
   cudaFree(dXt);

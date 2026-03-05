@@ -78,6 +78,9 @@ __global__ void fill_thread_index(int* out, int n) {
  * @param threads_per_block  Threads per block (default: 256).
  * @return  Host vector containing the result.
  */
+/// @note Error checking is deliberately omitted here to keep the focus on
+///       the host↔device workflow.  Lesson 03 introduces the CUDA_CHECK macro
+///       that wraps every runtime call — from that point on, all lessons use it.
 std::vector<int> launch_fill_thread_index(int n, int threads_per_block = 256) {
   // 1. Allocate device memory.
   int* d_out = nullptr;

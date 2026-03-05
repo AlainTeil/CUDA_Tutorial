@@ -131,6 +131,16 @@ __global__ void blelloch_scan_block(float* data, float* block_sums, int n) {
 // Add scanned block sums back to each block
 // =============================================================================
 
+/**
+ * @brief Add per-block partial sums to complete a global exclusive scan.
+ *
+ * After scanning each block independently, this kernel adds the scanned
+ * block total to every element within the corresponding block.
+ *
+ * @param data        In/out scan results (device pointer, length n).
+ * @param block_sums  Scanned per-block totals (device pointer, length gridDim.x).
+ * @param n           Total number of elements.
+ */
 __global__ void add_block_sums(float* data, const float* block_sums, int n) {
   int gid = blockIdx.x * blockDim.x + threadIdx.x;
   if (gid < n && blockIdx.x > 0) {
@@ -147,6 +157,7 @@ void gpu_exclusive_scan(float* d_data, int n) {
 
   if (blocks == 1) {
     blelloch_scan_block<<<1, kBlockSize>>>(d_data, nullptr, n);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     return;
   }
@@ -156,6 +167,7 @@ void gpu_exclusive_scan(float* d_data, int n) {
   CUDA_CHECK(cudaMalloc(&d_block_sums, static_cast<size_t>(blocks) * sizeof(float)));
 
   blelloch_scan_block<<<blocks, kBlockSize>>>(d_data, d_block_sums, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Level 2: scan the block sums themselves
@@ -163,6 +175,7 @@ void gpu_exclusive_scan(float* d_data, int n) {
 
   // Level 3: add scanned block sums back
   add_block_sums<<<blocks, kBlockSize>>>(d_data, d_block_sums, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   CUDA_CHECK(cudaFree(d_block_sums));

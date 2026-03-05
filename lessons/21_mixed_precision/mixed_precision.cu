@@ -97,11 +97,15 @@
 /// @defgroup fp16_convert FP16 ↔ FP32 conversion
 /// @{
 
-/// Convert an array of FP32 values to FP16 (`__half`).
-///
-/// Each thread converts one element.  The `__float2half()` intrinsic rounds
-/// the 32-bit float to the nearest representable 16-bit value.  Values
-/// outside FP16 range (±65504) saturate to ±inf.
+/**
+ * @brief Convert an array of FP32 values to FP16 (`__half`).
+ *
+ * Each thread converts one element via the `__float2half()` intrinsic.
+ *
+ * @param src  Source FP32 array (device pointer, length n).
+ * @param dst  Destination FP16 array (device pointer, length n).
+ * @param n    Number of elements.
+ */
 __global__ void fp32_to_fp16_kernel(const float* __restrict__ src, __half* __restrict__ dst,
                                     int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -110,9 +114,13 @@ __global__ void fp32_to_fp16_kernel(const float* __restrict__ src, __half* __res
   }
 }
 
-/// Convert an array of FP16 values back to FP32.
-///
-/// This is lossless — every FP16 value is exactly representable in FP32.
+/**
+ * @brief Convert an array of FP16 values back to FP32 (lossless).
+ *
+ * @param src  Source FP16 array (device pointer, length n).
+ * @param dst  Destination FP32 array (device pointer, length n).
+ * @param n    Number of elements.
+ */
 __global__ void fp16_to_fp32_kernel(const __half* __restrict__ src, float* __restrict__ dst,
                                     int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -127,12 +135,14 @@ __global__ void fp16_to_fp32_kernel(const __half* __restrict__ src, float* __res
 static void fp32_to_fp16(const float* d_src, __half* d_dst, int n) {
   int blk = 256;
   fp32_to_fp16_kernel<<<(n + blk - 1) / blk, blk>>>(d_src, d_dst, n);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 /// Helper: launch FP16 → FP32 conversion.
 static void fp16_to_fp32(const __half* d_src, float* d_dst, int n) {
   int blk = 256;
   fp16_to_fp32_kernel<<<(n + blk - 1) / blk, blk>>>(d_src, d_dst, n);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 // =============================================================================
@@ -214,7 +224,13 @@ static void gemm_fp32_AT(cublasHandle_t h, int M, int K, int N, float alpha, con
 /// @defgroup kernels Element-wise kernels
 /// @{
 
-/// ReLU forward: out = max(0, x).
+/**
+ * @brief ReLU forward: out = max(0, x).
+ *
+ * @param x    Input activations (device pointer, length n).
+ * @param out  Output activations (device pointer, length n).
+ * @param n    Number of elements.
+ */
 __global__ void relu_fwd(const float* __restrict__ x, float* __restrict__ out, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
@@ -222,7 +238,14 @@ __global__ void relu_fwd(const float* __restrict__ x, float* __restrict__ out, i
   }
 }
 
-/// ReLU backward: dX = dY * (Z > 0).
+/**
+ * @brief ReLU backward: dX = dY * (Z > 0).
+ *
+ * @param z   Pre-activation values (device pointer, length n).
+ * @param dy  Upstream gradient (device pointer, length n).
+ * @param dx  Output gradient w.r.t. input (device pointer, length n).
+ * @param n   Number of elements.
+ */
 __global__ void relu_bwd(const float* __restrict__ z, const float* __restrict__ dy,
                          float* __restrict__ dx, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -231,7 +254,14 @@ __global__ void relu_bwd(const float* __restrict__ z, const float* __restrict__ 
   }
 }
 
-/// Add bias: out[b*D + j] += bias[j]  for all rows b in [0, B).
+/**
+ * @brief Add bias to every row of a [B×D] matrix: out[b*D+j] += bias[j].
+ *
+ * @param out   Activation matrix to update in-place (device pointer, B × D).
+ * @param bias  Bias vector (device pointer, length D).
+ * @param B     Batch size (number of rows).
+ * @param D     Feature dimension (number of columns).
+ */
 __global__ void add_bias(float* __restrict__ out, const float* __restrict__ bias, int B, int D) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < B * D) {
@@ -240,8 +270,14 @@ __global__ void add_bias(float* __restrict__ out, const float* __restrict__ bias
   }
 }
 
-/// Cross-entropy backward: dZ = softmax(logits) − target.
-/// Expects `log_sm` = log-softmax output, `target` = one-hot.
+/**
+ * @brief Cross-entropy backward: dZ = softmax(logits) − target.
+ *
+ * @param log_sm  Log-softmax output (device pointer, length n).
+ * @param target  One-hot targets (device pointer, length n).
+ * @param dz      Output gradient (device pointer, length n).
+ * @param n       Total elements (B × C).
+ */
 __global__ void ce_bwd(const float* __restrict__ log_sm, const float* __restrict__ target,
                        float* __restrict__ dz, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -250,7 +286,14 @@ __global__ void ce_bwd(const float* __restrict__ log_sm, const float* __restrict
   }
 }
 
-/// Column sum: out[j] = Σ_b  in[b*D + j],  j ∈ [0, D).
+/**
+ * @brief Sum columns of a [B×D] matrix into a vector of length D.
+ *
+ * @param in   Input matrix (device pointer, B × D row-major).
+ * @param out  Column-sum output vector (device pointer, length D).
+ * @param B    Number of rows (batch size).
+ * @param D    Number of columns (feature dimension).
+ */
 __global__ void col_sum(const float* __restrict__ in, float* __restrict__ out, int B, int D) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j < D) {
@@ -262,7 +305,13 @@ __global__ void col_sum(const float* __restrict__ in, float* __restrict__ out, i
   }
 }
 
-/// Scale every element by a constant.
+/**
+ * @brief Scale every element by a constant: data[i] *= s.
+ *
+ * @param data  Array to scale in-place (device pointer, length n).
+ * @param s     Scalar multiplier.
+ * @param n     Number of elements.
+ */
 __global__ void scale_kernel(float* __restrict__ data, float s, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
@@ -270,8 +319,15 @@ __global__ void scale_kernel(float* __restrict__ data, float s, int n) {
   }
 }
 
-/// Batch log-softmax: one block per row (sample).
-/// Computes log_sm[b][c] = logit[b][c] − log(Σ_c exp(logit[b][c])).
+/**
+ * @brief Per-row log-softmax: log_sm[b][c] = logit[b][c] − log(Σ exp(logit[b][c])).
+ *
+ * One block per row (sample). Numerically stable via max-subtraction.
+ *
+ * @param logits  Input logit matrix (device pointer, B × C row-major).
+ * @param log_sm  Output log-softmax matrix (device pointer, B × C).
+ * @param C       Number of classes (columns).
+ */
 __global__ void batch_log_softmax(const float* __restrict__ logits, float* __restrict__ log_sm,
                                   int C) {
   int b = blockIdx.x;
@@ -289,7 +345,17 @@ __global__ void batch_log_softmax(const float* __restrict__ logits, float* __res
   for (int c = 0; c < C; ++c) out[c] = row[c] - log_sum;
 }
 
-/// Cross-entropy loss from log-softmax: L = −(1/B) Σ_b Σ_c  t[b][c] · ls[b][c].
+/**
+ * @brief Cross-entropy loss: L = −(1/B) Σ target[i] * log_sm[i].
+ *
+ * Single-thread kernel for simplicity; called with <<<1,1>>>.
+ *
+ * @param log_sm  Log-softmax output (device pointer, B × C).
+ * @param target  One-hot targets (device pointer, B × C).
+ * @param loss    Scalar loss output (device pointer, single float).
+ * @param B       Batch size.
+ * @param C       Number of classes.
+ */
 __global__ void ce_loss_kernel(const float* __restrict__ log_sm, const float* __restrict__ target,
                                float* __restrict__ loss, int B, int C) {
   // Single-thread kernel for simplicity; called with <<<1,1>>>.
@@ -300,7 +366,14 @@ __global__ void ce_loss_kernel(const float* __restrict__ log_sm, const float* __
   *loss = s / static_cast<float>(B);
 }
 
-/// SGD update: W -= lr * dW.
+/**
+ * @brief SGD update: W[i] -= lr * dW[i].
+ *
+ * @param W    Parameter array to update in-place (device pointer, length n).
+ * @param dW   Gradient array (device pointer, length n).
+ * @param lr   Learning rate.
+ * @param n    Number of parameters.
+ */
 __global__ void sgd_update(float* __restrict__ W, const float* __restrict__ dW, float lr, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) {
@@ -308,7 +381,13 @@ __global__ void sgd_update(float* __restrict__ W, const float* __restrict__ dW, 
   }
 }
 
-/// Grid-stride reduction: sum all elements.
+/**
+ * @brief Grid-stride reduction: sum all elements via warp shuffles + atomicAdd.
+ *
+ * @param in   Input array (device pointer, length n).
+ * @param out  Scalar sum output (device pointer, single float; must be zeroed before launch).
+ * @param n    Number of elements.
+ */
 __global__ void reduce_sum_kernel(const float* __restrict__ in, float* __restrict__ out, int n) {
   float s = 0.0F;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
@@ -498,21 +577,26 @@ struct MixedPrecisionMLP {
     // Z1[B×hid] = X[B×in] · W1[in×hid]
     gemm_fp32(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // A1 = relu(Z1)
     relu_fwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, A1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // Z2[B×out] = A1[B×hid] · W2[hid×out]
     gemm_fp32(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(B * out_dim + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // Log-softmax + cross-entropy loss.
     batch_log_softmax<<<B, 1>>>(Z2, LS, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     float* d_loss;
     CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
     CUDA_CHECK(cudaMemset(d_loss, 0, sizeof(float)));
     ce_loss_kernel<<<1, 1>>>(LS, d_target, d_loss, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     float h_loss = 0.0F;
     CUDA_CHECK(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
@@ -543,9 +627,11 @@ struct MixedPrecisionMLP {
     // Convert Z1_h → Z1 (FP32) for bias add and ReLU.
     fp16_to_fp32(Z1_h, Z1, B * hid_dim);
     add_bias<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // A1 = relu(Z1)
     relu_fwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, A1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // Convert A1 → A1_h (FP16) for layer 2 GEMM.
     fp32_to_fp16(A1, A1_h, B * hid_dim);
@@ -556,14 +642,17 @@ struct MixedPrecisionMLP {
     // Convert Z2_h → Z2 (FP32) for bias + softmax.
     fp16_to_fp32(Z2_h, Z2, B * out_dim);
     add_bias<<<(B * out_dim + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // Log-softmax + CE loss — always in FP32 for accuracy.
     batch_log_softmax<<<B, 1>>>(Z2, LS, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     float* d_loss;
     CUDA_CHECK(cudaMalloc(&d_loss, sizeof(float)));
     CUDA_CHECK(cudaMemset(d_loss, 0, sizeof(float)));
     ce_loss_kernel<<<1, 1>>>(LS, d_target, d_loss, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     float h_loss = 0.0F;
     CUDA_CHECK(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
@@ -596,13 +685,16 @@ struct MixedPrecisionMLP {
 
     // dZ2 = softmax(Z2) − target  [B×out]
     ce_bwd<<<(B * out_dim + blk - 1) / blk, blk>>>(LS, d_target, dZ2, B * out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // dW2 = (1/B) · A1^T · dZ2  [hid×out]
     gemm_fp32_AT(cublas, hid_dim, B, out_dim, inv_B, A1, dZ2, 0.0F, dW2);
 
     // db2 = (1/B) · col_sum(dZ2)
     col_sum<<<(out_dim + blk - 1) / blk, blk>>>(dZ2, db2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // dA1 = dZ2 · W2^T  [B×hid]
     {
@@ -616,13 +708,16 @@ struct MixedPrecisionMLP {
 
     // dZ1 = dA1 ⊙ relu'(Z1)
     relu_bwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, dA1, dZ1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // dW1 = (1/B) · X^T · dZ1  [in×hid]
     gemm_fp32_AT(cublas, in_dim, B, hid_dim, inv_B, d_X, dZ1, 0.0F, dW1);
 
     // db1 = (1/B) · col_sum(dZ1)
     col_sum<<<(hid_dim + blk - 1) / blk, blk>>>(dZ1, db1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaDeviceSynchronize());
   }
@@ -644,7 +739,9 @@ struct MixedPrecisionMLP {
 
     // --- dZ2 = softmax(Z2) − target,  then scale ---
     ce_bwd<<<(B * out_dim + blk - 1) / blk, blk>>>(LS, d_target, dZ2, B * out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(B * out_dim + blk - 1) / blk, blk>>>(dZ2, loss_scale, B * out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // Convert scaled dZ2 → FP16.
     fp32_to_fp16(dZ2, dZ2_h, B * out_dim);
@@ -656,7 +753,9 @@ struct MixedPrecisionMLP {
 
     // --- db2 = (1/B) · col_sum(dZ2)  (already in FP32, but scaled) ---
     col_sum<<<(out_dim + blk - 1) / blk, blk>>>(dZ2, db2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- dA1 = dZ2_h · W2_h^T  [B×hid] → FP16 ---
     {
@@ -673,6 +772,7 @@ struct MixedPrecisionMLP {
 
     // --- dZ1 = dA1 ⊙ relu'(Z1)  (FP32) ---
     relu_bwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, dA1, dZ1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     fp32_to_fp16(dZ1, dZ1_h, B * hid_dim);
 
     // --- dW1 = (1/B) · X_h^T · dZ1_h  [in×hid] → FP16 ---
@@ -681,16 +781,22 @@ struct MixedPrecisionMLP {
 
     // --- db1 = (1/B) · col_sum(dZ1)  (FP32, scaled) ---
     col_sum<<<(hid_dim + blk - 1) / blk, blk>>>(dZ1, db1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- Un-scale all gradients ---
     float inv_scale = 1.0F / loss_scale;
     int n_dW2 = hid_dim * out_dim;
     int n_dW1 = in_dim * hid_dim;
     scale_kernel<<<(n_dW2 + blk - 1) / blk, blk>>>(dW2, inv_scale, n_dW2);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(n_dW1 + blk - 1) / blk, blk>>>(dW1, inv_scale, n_dW1);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_scale, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_scale, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaDeviceSynchronize());
   }
@@ -719,9 +825,13 @@ struct MixedPrecisionMLP {
     int blk = 256;
     int n1 = in_dim * hid_dim, n2 = hid_dim * out_dim;
     sgd_update<<<(n1 + blk - 1) / blk, blk>>>(W1, dW1, lr, n1);
+    CUDA_CHECK(cudaGetLastError());
     sgd_update<<<(hid_dim + blk - 1) / blk, blk>>>(b1, db1, lr, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     sgd_update<<<(n2 + blk - 1) / blk, blk>>>(W2, dW2, lr, n2);
+    CUDA_CHECK(cudaGetLastError());
     sgd_update<<<(out_dim + blk - 1) / blk, blk>>>(b2, db2, lr, out_dim);
+    CUDA_CHECK(cudaGetLastError());
   }
 
   /// @}
@@ -740,9 +850,12 @@ struct MixedPrecisionMLP {
     // Forward through both layers (FP32).
     gemm_fp32(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(B * hid_dim + blk - 1) / blk, blk>>>(Z1, A1, B * hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     gemm_fp32(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(B * out_dim + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy logits to host and argmax.

@@ -41,13 +41,23 @@
 // Max Pool forward (store indices for backward)
 // =============================================================================
 
-/// Each thread handles one output position.  It scans the pooling window and
-/// records the *index* of the winning (maximum) element.  Storing that index
-/// is critical because the backward pass must know **which** input produced
-/// the max — only that input receives the gradient ("gradient routing").
-///
-/// Grid mapping: 2D — blockIdx.x covers output columns, blockIdx.y covers
-/// output rows.  This matches the spatial layout naturally.
+/**
+ * @brief 2D max-pooling forward pass with argmax index storage.
+ *
+ * Each thread handles one output position.  It scans the pooling window and
+ * records the index of the winning (maximum) element.  Storing that index
+ * is critical because the backward pass must know which input produced
+ * the max — only that input receives the gradient ("gradient routing").
+ *
+ * @param in      Input feature map (H × W)
+ * @param out     Output feature map (OH × OW)
+ * @param indices Output argmax indices for backward pass (OH × OW)
+ * @param H       Input height
+ * @param W       Input width
+ * @param pool_h  Pooling window height
+ * @param pool_w  Pooling window width
+ * @param stride  Stride of the pooling window
+ */
 __global__ void maxpool_forward(const float* in, float* out, int* indices, int H, int W, int pool_h,
                                 int pool_w, int stride) {
   // Output spatial dimensions — integer arithmetic mirrors the standard
@@ -83,18 +93,20 @@ __global__ void maxpool_forward(const float* in, float* out, int* indices, int H
 // Max Pool backward
 // =============================================================================
 
-/// For max-pooling the gradient rule is simple: the gradient flows *only*
-/// to the element that was selected as the maximum in the forward pass.
-/// All other input positions within the window receive zero gradient.
-///
-/// Why atomicAdd?  When pooling windows overlap (stride < pool size) two
-/// different output positions could name the same input element as their
-/// max.  Even with non-overlapping windows, writing to arbitrary (scattered)
-/// locations in grad_in means multiple threads *could* target the same
-/// address if the same input value won in two windows.  `atomicAdd`
-/// guarantees correct accumulation regardless.
-///
-/// IMPORTANT: grad_in must be zeroed before calling this kernel.
+/**
+ * @brief Max-pooling backward: route gradients to max-index positions.
+ *
+ * The gradient flows only to the element that was selected as the maximum
+ * in the forward pass.  All other input positions receive zero gradient.
+ * Uses atomicAdd because overlapping windows may target the same input.
+ *
+ * IMPORTANT: grad_in must be zeroed before calling this kernel.
+ *
+ * @param grad_out Upstream gradient (OH × OW)
+ * @param indices  Argmax indices from the forward pass (OH × OW)
+ * @param grad_in  Gradient w.r.t. input (H × W), must be pre-zeroed
+ * @param out_size Total number of output elements (OH * OW)
+ */
 __global__ void maxpool_backward(const float* grad_out, const int* indices, float* grad_in,
                                  int out_size) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -108,13 +120,21 @@ __global__ void maxpool_backward(const float* grad_out, const int* indices, floa
 // Average Pool forward
 // =============================================================================
 
-/// Average pooling replaces the max with a simple arithmetic mean over the
-/// window.  It treats every input element equally, so the gradient in the
-/// backward pass is simply distributed uniformly (1 / pool_area per element).
-///
-/// Avg-pool is commonly used in the final layers of classification networks
-/// ("global average pooling") to collapse spatial dimensions before the
-/// fully connected head.
+/**
+ * @brief 2D average-pooling forward pass.
+ *
+ * Computes the arithmetic mean over each pooling window.  Every input
+ * element contributes equally, so the backward gradient is distributed
+ * uniformly (1 / pool_area per element).
+ *
+ * @param in      Input feature map (H × W)
+ * @param out     Output feature map (OH × OW)
+ * @param H       Input height
+ * @param W       Input width
+ * @param pool_h  Pooling window height
+ * @param pool_w  Pooling window width
+ * @param stride  Stride of the pooling window
+ */
 __global__ void avgpool_forward(const float* in, float* out, int H, int W, int pool_h, int pool_w,
                                 int stride) {
   int OH = (H - pool_h) / stride + 1;
@@ -139,15 +159,23 @@ __global__ void avgpool_forward(const float* in, float* out, int H, int W, int p
 // Average Pool backward
 // =============================================================================
 
-/// Because the forward pass computes an average, the gradient is split
-/// equally among all inputs inside the window:
-///    dL/d(in_{r,c}) += dL/d(out_{or,oc}) / (pool_h * pool_w)
-///
-/// Like max-pool backward, we use atomicAdd because the scatter targets
-/// overlap when stride < pool size (and even without overlap, the write
-/// pattern is irregular from the GPU's perspective).
-///
-/// IMPORTANT: grad_in must be zeroed before calling this kernel.
+/**
+ * @brief Average-pooling backward: distribute gradient uniformly over pool window.
+ *
+ * Each input element in the window receives an equal share of the upstream
+ * gradient: dL/d(in) += dL/d(out) / (pool_h * pool_w).
+ * Uses atomicAdd for correct accumulation with overlapping windows.
+ *
+ * IMPORTANT: grad_in must be zeroed before calling this kernel.
+ *
+ * @param grad_out Upstream gradient (OH × OW)
+ * @param grad_in  Gradient w.r.t. input (H × W), must be pre-zeroed
+ * @param H        Input height
+ * @param W        Input width
+ * @param pool_h   Pooling window height
+ * @param pool_w   Pooling window width
+ * @param stride   Stride of the pooling window
+ */
 __global__ void avgpool_backward(const float* grad_out, float* grad_in, int H, int W, int pool_h,
                                  int pool_w, int stride) {
   int OH = (H - pool_h) / stride + 1;
@@ -188,6 +216,7 @@ int main() {
   dim3 blocks((OW + 15) / 16, (OH + 15) / 16);
 
   maxpool_forward<<<blocks, threads>>>(d_in, d_out, d_idx, H, W, P, P, S);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_out(OH * OW);

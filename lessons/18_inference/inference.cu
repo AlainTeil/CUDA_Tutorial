@@ -50,8 +50,16 @@
 // project you’d factor them into a shared library or header.  Duplication
 // here keeps each lesson a single, runnable file.
 
-/// Dense forward:  Y[1×out] = X[1×in] · W[in×out] + b[1×out].
-
+/**
+ * @brief Dense forward: Y = X · W + b (see Lesson 12).
+ *
+ * @param X        Input activations (device pointer, length in_dim).
+ * @param W        Weight matrix (device pointer, in_dim × out_dim).
+ * @param b        Bias vector (device pointer, length out_dim).
+ * @param Y        Output activations (device pointer, length out_dim).
+ * @param in_dim   Number of input features.
+ * @param out_dim  Number of output neurons.
+ */
 __global__ void dense_fwd(const float* X, const float* W, const float* b, float* Y, int in_dim,
                           int out_dim) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -62,6 +70,15 @@ __global__ void dense_fwd(const float* X, const float* W, const float* b, float*
   }
 }
 
+/**
+ * @brief Dense backward — gradient w.r.t. input: dX = dY · W^T (see Lesson 12).
+ *
+ * @param dY       Upstream gradient (device pointer, length out_dim).
+ * @param W        Weight matrix (device pointer, in_dim × out_dim).
+ * @param dX       Output gradient w.r.t. input (device pointer, length in_dim).
+ * @param in_dim   Number of input features.
+ * @param out_dim  Number of output neurons.
+ */
 __global__ void dense_bwd_dX(const float* dY, const float* W, float* dX, int in_dim, int out_dim) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < in_dim) {
@@ -71,6 +88,15 @@ __global__ void dense_bwd_dX(const float* dY, const float* W, float* dX, int in_
   }
 }
 
+/**
+ * @brief Dense backward — gradient w.r.t. weights: dW = X^T · dY (see Lesson 12).
+ *
+ * @param X        Input activations (device pointer, length in_dim).
+ * @param dY       Upstream gradient (device pointer, length out_dim).
+ * @param dW       Weight gradient output (device pointer, in_dim × out_dim).
+ * @param in_dim   Number of input features.
+ * @param out_dim  Number of output neurons.
+ */
 __global__ void dense_bwd_dW(const float* X, const float* dY, float* dW, int in_dim, int out_dim) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int i = idx / out_dim;
@@ -78,16 +104,38 @@ __global__ void dense_bwd_dW(const float* X, const float* dY, float* dW, int in_
   if (i < in_dim && j < out_dim) dW[i * out_dim + j] = X[i] * dY[j];
 }
 
+/**
+ * @brief ReLU forward: out = max(0, in) (see Lesson 13).
+ *
+ * @param in   Input activations (device pointer, length N).
+ * @param out  Output activations (device pointer, length N).
+ * @param N    Number of elements.
+ */
 __global__ void relu_fwd(const float* in, float* out, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) out[i] = (in[i] > 0.0F) ? in[i] : 0.0F;
 }
 
+/**
+ * @brief ReLU backward: pass gradient where input > 0 (see Lesson 13).
+ *
+ * @param in  Pre-activation values (device pointer, length N).
+ * @param go  Upstream gradient (device pointer, length N).
+ * @param gi  Output gradient w.r.t. input (device pointer, length N).
+ * @param N   Number of elements.
+ */
 __global__ void relu_bwd(const float* in, const float* go, float* gi, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) gi[i] = (in[i] > 0.0F) ? go[i] : 0.0F;
 }
 
+/**
+ * @brief Numerically stable log-softmax (see Lesson 16).
+ *
+ * @param logits  Input logits (device pointer, length N).
+ * @param log_sm  Output log-softmax values (device pointer, length N).
+ * @param N       Number of classes.
+ */
 __global__ void log_softmax_k2(const float* logits, float* log_sm, int N) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -111,16 +159,39 @@ __global__ void log_softmax_k2(const float* logits, float* log_sm, int N) {
   if (tid < N) log_sm[tid] = (val - mx) - lse;
 }
 
+/**
+ * @brief Cross-entropy forward: elem[i] = -target[i] * log_sm[i] (see Lesson 16).
+ *
+ * @param log_sm  Log-softmax output (device pointer, length N).
+ * @param target  One-hot target vector (device pointer, length N).
+ * @param elem    Per-element loss output (device pointer, length N).
+ * @param N       Number of classes.
+ */
 __global__ void ce_fwd(const float* log_sm, const float* target, float* elem, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) elem[i] = -target[i] * log_sm[i];
 }
 
+/**
+ * @brief Cross-entropy backward: grad = softmax − target (see Lesson 16).
+ *
+ * @param log_sm  Log-softmax output (device pointer, length N).
+ * @param target  One-hot target vector (device pointer, length N).
+ * @param grad    Output gradient (device pointer, length N).
+ * @param N       Number of classes.
+ */
 __global__ void ce_bwd(const float* log_sm, const float* target, float* grad, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) grad[i] = expf(log_sm[i]) - target[i];
 }
 
+/**
+ * @brief Shared-memory reduction sum (see Lesson 08).
+ *
+ * @param in   Input array (device pointer, length N).
+ * @param out  Scalar sum output (device pointer, single float).
+ * @param N    Number of elements.
+ */
 __global__ void reduce_sum_k2(const float* in, float* out, int N) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -133,6 +204,14 @@ __global__ void reduce_sum_k2(const float* in, float* out, int N) {
   if (tid == 0) *out = sdata[0];
 }
 
+/**
+ * @brief SGD update: param[i] -= lr * grad[i].
+ *
+ * @param param  Parameter array to update in-place (device pointer, length N).
+ * @param grad   Gradient array (device pointer, length N).
+ * @param lr     Learning rate.
+ * @param N      Number of parameters.
+ */
 __global__ void sgd_upd(float* param, const float* grad, float lr, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) param[i] -= lr * grad[i];
@@ -142,10 +221,12 @@ __global__ void sgd_upd(float* param, const float* grad, float lr, int N) {
 // MLP with save/load — extends Lesson 17’s MLP with serialisation
 // =============================================================================
 
-/// The InferenceMLP adds save() and load() to the basic MLP struct, plus
-/// a predict_batch() convenience method for running inference on many
-/// samples sequentially.  In production, batching would be done on-device
-/// (e.g., batched GEMM) for much higher throughput.
+/**
+ * @brief Two-layer MLP with save/load and batched inference (extends Lesson 17).
+ *
+ * Adds weight serialisation (save/load) and a predict_batch() method
+ * for running inference on many samples sequentially.
+ */
 struct InferenceMLP {
   int in_dim{}, hid_dim{}, out_dim{};
   float *W1{}, *b1{}, *W2{}, *b2{};
@@ -257,11 +338,17 @@ struct InferenceMLP {
     int bp = 1;
     while (bp < out_dim) bp <<= 1;
     dense_fwd<<<1, hid_dim>>>(d_x, W1, b1, z1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<1, hid_dim>>>(z1, a1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_fwd<<<1, out_dim>>>(a1, W2, b2, z2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     log_softmax_k2<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(z2, log_sm, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     ce_fwd<<<1, out_dim>>>(log_sm, d_target, elem_loss, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     reduce_sum_k2<<<1, bp, static_cast<size_t>(bp) * sizeof(float)>>>(elem_loss, d_loss, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     float h_loss;
     CUDA_CHECK(cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost));
@@ -270,12 +357,17 @@ struct InferenceMLP {
 
   void backward(const float* d_x, const float* d_target) {
     ce_bwd<<<1, out_dim>>>(log_sm, d_target, dz2, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_bwd_dW<<<1, hid_dim * out_dim>>>(a1, dz2, dW2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpy(db2, dz2, static_cast<size_t>(out_dim) * sizeof(float),
                           cudaMemcpyDeviceToDevice));
     dense_bwd_dX<<<1, hid_dim>>>(dz2, W2, da1, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_bwd<<<1, hid_dim>>>(z1, da1, dz1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_bwd_dW<<<1, in_dim * hid_dim>>>(d_x, dz1, dW1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpy(db1, dz1, static_cast<size_t>(hid_dim) * sizeof(float),
                           cudaMemcpyDeviceToDevice));
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -284,6 +376,7 @@ struct InferenceMLP {
   void sgd_step(float lr) {
     auto upd = [lr](float* p, const float* g, int n) {
       sgd_upd<<<(n + 255) / 256, 256>>>(p, g, lr, n);
+      CUDA_CHECK(cudaGetLastError());
     };
     upd(W1, dW1, in_dim * hid_dim);
     upd(b1, db1, hid_dim);
@@ -299,8 +392,11 @@ struct InferenceMLP {
   /// softmax is monotone, so it doesn’t change which class wins.
   [[nodiscard]] int predict(const float* d_x) {
     dense_fwd<<<1, hid_dim>>>(d_x, W1, b1, z1, in_dim, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<1, hid_dim>>>(z1, a1, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     dense_fwd<<<1, out_dim>>>(a1, W2, b2, z2, hid_dim, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     std::vector<float> h_z(static_cast<size_t>(out_dim));
     CUDA_CHECK(cudaMemcpy(h_z.data(), z2, static_cast<size_t>(out_dim) * sizeof(float),

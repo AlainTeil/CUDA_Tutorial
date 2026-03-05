@@ -8,8 +8,20 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
+
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
+  } while (0)
 
 // ---------- Kernel (same as lesson source) -----------------------------------
 
@@ -30,6 +42,7 @@ static std::vector<int> launch(int n, int threads_per_block = 256) {
 
   int blocks = (n + threads_per_block - 1) / threads_per_block;
   fill_thread_index<<<blocks, threads_per_block>>>(d_out, n);
+  CUDA_CHECK(cudaGetLastError());
   cudaDeviceSynchronize();
 
   std::vector<int> h_out(static_cast<size_t>(n));

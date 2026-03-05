@@ -1,4 +1,3 @@
-cmake_minimum_required(VERSION 3.20)
 
 add_executable(17_training training.cu)
 target_link_libraries(17_training PRIVATE CUDA::cudart)

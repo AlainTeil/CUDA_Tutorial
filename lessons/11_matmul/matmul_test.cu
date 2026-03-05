@@ -6,12 +6,18 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 constexpr int kTile = 16;
@@ -81,6 +87,7 @@ TEST_P(MatmulTest, NaiveMatchesCPU) {
   dim3 threads(kTile, kTile);
   dim3 blocks((N + kTile - 1) / kTile, (M + kTile - 1) / kTile);
   matmul_naive<<<blocks, threads>>>(dA, dB, dC, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> hC(hC_ref.size());
@@ -117,6 +124,7 @@ TEST_P(MatmulTest, TiledMatchesCPU) {
   dim3 threads(kTile, kTile);
   dim3 blocks((N + kTile - 1) / kTile, (M + kTile - 1) / kTile);
   matmul_tiled<<<blocks, threads>>>(dA, dB, dC, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> hC(hC_ref.size());
@@ -154,6 +162,7 @@ TEST(MatmulTest, IdentityMatrix) {
   dim3 threads(kTile, kTile);
   dim3 blocks((kN + kTile - 1) / kTile, (kN + kTile - 1) / kTile);
   matmul_tiled<<<blocks, threads>>>(dA, dI, dC, kN, kN, kN);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> hC(kN * kN);

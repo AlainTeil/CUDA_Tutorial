@@ -68,6 +68,10 @@ constexpr int kBlockSize = 256;
  * iteration, active threads are always contiguous (threads 0..stride-1).
  * This avoids the warp divergence that plagues the "interleaved" pattern
  * (where in the first step only even threads are active, then every 4th, ...).
+ *
+ * @param in   Input array (device pointer, length n).
+ * @param out  Per-block partial sums (device pointer, length gridDim.x).
+ * @param n    Total number of elements.
  */
 __global__ void reduce_shared(const float* in, float* out, int n) {
   __shared__ float sdata[kBlockSize];
@@ -128,6 +132,10 @@ __device__ float warp_reduce_sum(float val) {
  *
  * This approach uses minimal shared memory (blockDim/32 floats) and avoids
  * the log2(blockDim) barriers of the pure shared-memory approach.
+ *
+ * @param in   Input array (device pointer, length n).
+ * @param out  Per-block partial sums (device pointer, length gridDim.x).
+ * @param n    Total number of elements.
  */
 __global__ void reduce_warp_shuffle(const float* in, float* out, int n) {
   int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -176,6 +184,7 @@ float gpu_reduce(const float* d_in, int n, Kernel kernel) {
   CUDA_CHECK(cudaMalloc(&d_out, static_cast<size_t>(blocks) * sizeof(float)));
 
   kernel<<<blocks, kBlockSize>>>(d_in, d_out, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   float result;

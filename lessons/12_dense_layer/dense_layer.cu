@@ -58,11 +58,20 @@ constexpr int kTile = 16;
 // Tiled matmul (reused from Lesson 11)
 // =============================================================================
 
-/// @brief Tiled GEMM kernel: C = A(M×K) × B(K×N).
-///
-/// Identical to the kernel in Lesson 11.  It is duplicated here because each
-/// lesson compiles independently (no shared library).  Later lessons (19–21)
-/// replace this with `cublasSgemm` for production-quality performance.
+/**
+ * @brief Tiled GEMM kernel: C = A(M×K) × B(K×N).
+ *
+ * Identical to the kernel in Lesson 11.  It is duplicated here because each
+ * lesson compiles independently (no shared library).  Later lessons (19–21)
+ * replace this with `cublasSgemm` for production-quality performance.
+ *
+ * @param A  Input matrix A in row-major layout (M × K).
+ * @param B  Input matrix B in row-major layout (K × N).
+ * @param C  Output matrix C in row-major layout (M × N).
+ * @param M  Number of rows in A / rows in C.
+ * @param N  Number of columns in B / columns in C.
+ * @param K  Shared (contraction) dimension: columns of A / rows of B.
+ */
 __global__ void matmul_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
   __shared__ float As[kTile][kTile];
   __shared__ float Bs[kTile][kTile];
@@ -85,9 +94,17 @@ __global__ void matmul_kernel(const float* A, const float* B, float* C, int M, i
 // Transpose kernel (for computing Wᵀ and Xᵀ)
 // =============================================================================
 
-/// Naive transpose: `out[c][r] = in[r][c]`.
-/// Used to prepare Wᵀ for `dX = dY · Wᵀ` and Xᵀ for `dW = Xᵀ · dY`.
-/// For larger matrices, the tiled transpose from Lesson 10 would be faster.
+/**
+ * @brief Naive transpose: out[c][r] = in[r][c].
+ *
+ * Used to prepare Wᵀ for `dX = dY · Wᵀ` and Xᵀ for `dW = Xᵀ · dY`.
+ * For larger matrices, the tiled transpose from Lesson 10 would be faster.
+ *
+ * @param in    Input matrix in row-major layout (rows × cols).
+ * @param out   Output matrix in row-major layout (cols × rows).
+ * @param rows  Number of rows in the input matrix.
+ * @param cols  Number of columns in the input matrix.
+ */
 __global__ void transpose_kernel(const float* in, float* out, int rows, int cols) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -100,11 +117,18 @@ __global__ void transpose_kernel(const float* in, float* out, int rows, int cols
 // Bias add: Y[i][j] += b[j]
 // =============================================================================
 
-/// @brief Add bias vector to every row of Y.
-///
-/// Each thread handles one (row, col) element.  The bias is **broadcast**
-/// over the batch dimension — the same `b[col]` is added to every row.
-/// This is logically equivalent to `Y += ones(batch,1) · b`.
+/**
+ * @brief Add bias vector to every row of Y: Y[i][j] += b[j].
+ *
+ * Each thread handles one (row, col) element.  The bias is **broadcast**
+ * over the batch dimension — the same `b[col]` is added to every row.
+ * This is logically equivalent to `Y += ones(batch,1) · b`.
+ *
+ * @param Y        Output matrix (batch × out_dim), modified in-place.
+ * @param b        Bias vector of length out_dim.
+ * @param batch    Number of rows (batch size).
+ * @param out_dim  Number of columns (output features).
+ */
 __global__ void add_bias(float* Y, const float* b, int batch, int out_dim) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -117,13 +141,19 @@ __global__ void add_bias(float* Y, const float* b, int batch, int out_dim) {
 // Bias gradient: db[j] = sum_i dY[i][j]
 // =============================================================================
 
-/// @brief Compute bias gradient by summing dY along the batch axis.
-///
-/// Each thread handles one output column and loops over all batch rows.
-/// This is O(batch) work per thread.  For large batches, a parallel
-/// reduction (one block per column, tree reduction along rows) would be
-/// more efficient.  For the small batches used in this tutorial the serial
-/// loop is sufficient.
+/**
+ * @brief Compute bias gradient by summing dY along the batch axis.
+ *
+ * Each thread handles one output column and loops over all batch rows.
+ * db[j] = sum_i dY[i][j].  This is O(batch) work per thread.  For large
+ * batches, a parallel reduction would be more efficient; for the small
+ * batches used in this tutorial the serial loop is sufficient.
+ *
+ * @param dY       Upstream gradient matrix (batch × out_dim).
+ * @param db       Output bias gradient vector of length out_dim.
+ * @param batch    Number of rows (batch size).
+ * @param out_dim  Number of columns (output features).
+ */
 __global__ void bias_grad(const float* dY, float* db, int batch, int out_dim) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   if (col < out_dim) {
@@ -145,6 +175,7 @@ void gpu_matmul(const float* dA, const float* dB, float* dC, int M, int N, int K
   dim3 threads(kTile, kTile);
   dim3 blocks((N + kTile - 1) / kTile, (M + kTile - 1) / kTile);
   matmul_kernel<<<blocks, threads>>>(dA, dB, dC, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 /// Launch transpose: out = in^T  (in is rows×cols, out is cols×rows).
@@ -152,6 +183,7 @@ void gpu_transpose(const float* d_in, float* d_out, int rows, int cols) {
   dim3 threads(kTile, kTile);
   dim3 blocks((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
   transpose_kernel<<<blocks, threads>>>(d_in, d_out, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 // =============================================================================
@@ -172,6 +204,7 @@ void dense_forward(const float* dX, const float* dW, const float* db, float* dY,
   dim3 threads(kTile, kTile);
   dim3 blocks((out_dim + kTile - 1) / kTile, (batch + kTile - 1) / kTile);
   add_bias<<<blocks, threads>>>(dY, db, batch, out_dim);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 // =============================================================================
@@ -206,6 +239,7 @@ void dense_backward(const float* dX, const float* dW, const float* dY_grad, floa
 
   // db_grad = sum(dY_grad, axis=0)
   bias_grad<<<(out_dim + 255) / 256, 256>>>(dY_grad, db_grad, batch, out_dim);
+  CUDA_CHECK(cudaGetLastError());
 
   CUDA_CHECK(cudaFree(dWt));
   CUDA_CHECK(cudaFree(dXt));

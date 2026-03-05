@@ -5,12 +5,18 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 constexpr int kTile = 32;
@@ -64,6 +70,7 @@ TEST_P(TransposeTest, NaiveMatchesCPU) {
   dim3 threads(kTile, kTile);
   dim3 blocks((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
   transpose_naive<<<blocks, threads>>>(d_in, d_out, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> result(total);
@@ -91,6 +98,7 @@ TEST_P(TransposeTest, TiledMatchesCPU) {
   dim3 threads(kTile, kTile);
   dim3 blocks((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
   transpose_tiled<<<blocks, threads>>>(d_in, d_out, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> result(total);
@@ -117,11 +125,13 @@ TEST_P(TransposeTest, DoubleTransposeIsIdentity) {
   dim3 threads(kTile, kTile);
   dim3 blocks1((cols + kTile - 1) / kTile, (rows + kTile - 1) / kTile);
   transpose_tiled<<<blocks1, threads>>>(d_in, d_tmp, rows, cols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Transpose back: now transposed is cols×rows
   dim3 blocks2((rows + kTile - 1) / kTile, (cols + kTile - 1) / kTile);
   transpose_tiled<<<blocks2, threads>>>(d_tmp, d_out, cols, rows);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> result(total);

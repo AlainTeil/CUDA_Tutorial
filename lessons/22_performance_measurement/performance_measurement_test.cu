@@ -212,6 +212,7 @@ TEST(PerformanceMeasurement, GpuTimerPositive) {
   CUDA_CHECK(cudaMalloc(&d_b, 256 * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_c, 256 * sizeof(float)));
   vector_add_kernel<<<1, 256>>>(d_a, d_b, d_c, 256);
+  CUDA_CHECK(cudaGetLastError());
   timer.stop();
   float ms = timer.elapsed_ms();
   EXPECT_GT(ms, 0.0F) << "GPU timer should report positive elapsed time";
@@ -301,6 +302,7 @@ TEST(PerformanceMeasurement, VectorAddCorrectness) {
   CUDA_CHECK(cudaMemcpy(d_b, h_b.data(), bytes, cudaMemcpyHostToDevice));
 
   vector_add_kernel<<<(N + 255) / 256, 256>>>(d_a, d_b, d_c, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost));
 
   for (int i = 0; i < N; ++i) {
@@ -328,6 +330,7 @@ TEST(PerformanceMeasurement, SaxpyCorrectness) {
   CUDA_CHECK(cudaMemcpy(d_y, h_y.data(), bytes, cudaMemcpyHostToDevice));
 
   saxpy_kernel<<<(N + 255) / 256, 256>>>(3.0F, d_x, d_y, N);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaMemcpy(h_y.data(), d_y, bytes, cudaMemcpyDeviceToHost));
 
   for (int i = 0; i < N; ++i) {
@@ -355,6 +358,7 @@ TEST(PerformanceMeasurement, ReductionCorrectness) {
   int blk = 256;
   int grid = (N + blk - 1) / blk;
   reduce_sum_kernel<<<grid, blk, static_cast<size_t>(blk) * sizeof(float)>>>(d_in, d_out, N);
+  CUDA_CHECK(cudaGetLastError());
 
   float h_out = 0.0F;
   CUDA_CHECK(cudaMemcpy(&h_out, d_out, sizeof(float), cudaMemcpyDeviceToHost));
@@ -374,6 +378,7 @@ TEST(PerformanceMeasurement, BenchmarkRunnerPlausible) {
 
   auto result = benchmark_kernel(
       2, 5, [&]() { vector_add_kernel<<<(N + 255) / 256, 256>>>(d_a, d_a, d_c, N); });
+  CUDA_CHECK(cudaGetLastError());
 
   EXPECT_EQ(result.trials, 5);
   EXPECT_GT(result.min_ms, 0.0F);
@@ -396,6 +401,7 @@ TEST(PerformanceMeasurement, EffectiveBandwidthPlausible) {
 
   auto result = benchmark_kernel(
       3, 10, [&]() { vector_add_kernel<<<(N + 255) / 256, 256>>>(d_a, d_b, d_c, N); });
+  CUDA_CHECK(cudaGetLastError());
 
   size_t total_bytes = 3UL * N * sizeof(float);
   float bw = result.bandwidth_gb_s(total_bytes);

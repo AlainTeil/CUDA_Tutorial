@@ -108,20 +108,39 @@ static void gemm_rm_AT(cublasHandle_t h, int M, int K, int N, float alpha, const
 // Element-wise CUDA kernels
 // =============================================================================
 
-/// ReLU forward: out[i] = max(0, in[i]).  Works on any contiguous buffer.
+/**
+ * @brief ReLU forward: out[i] = max(0, in[i]) (see Lesson 13).
+ *
+ * @param in   Input activations (device pointer, length N).
+ * @param out  Output activations (device pointer, length N).
+ * @param N    Number of elements.
+ */
 __global__ void relu_fwd(const float* in, float* out, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) out[i] = (in[i] > 0.0F) ? in[i] : 0.0F;
 }
 
-/// ReLU backward: pass gradient where activation > 0, zero elsewhere.
+/**
+ * @brief ReLU backward: pass gradient where pre-activation > 0 (see Lesson 13).
+ *
+ * @param pre_act   Pre-activation values (device pointer, length N).
+ * @param grad_out  Upstream gradient (device pointer, length N).
+ * @param grad_in   Output gradient w.r.t. input (device pointer, length N).
+ * @param N         Number of elements.
+ */
 __global__ void relu_bwd(const float* pre_act, const float* grad_out, float* grad_in, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) grad_in[i] = (pre_act[i] > 0.0F) ? grad_out[i] : 0.0F;
 }
 
-/// Add bias to every row of a [B×D] matrix: Y[b][j] += bias[j].
-/// Each thread handles one element of the B×D matrix.
+/**
+ * @brief Add bias to every row of a [B×D] matrix: Y[b][j] += bias[j].
+ *
+ * @param Y     Activation matrix to update in-place (device pointer, B × D).
+ * @param bias  Bias vector (device pointer, length D).
+ * @param B     Batch size (number of rows).
+ * @param D     Feature dimension (number of columns).
+ */
 __global__ void add_bias(float* Y, const float* bias, int B, int D) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < B * D) {
@@ -130,11 +149,16 @@ __global__ void add_bias(float* Y, const float* bias, int B, int D) {
   }
 }
 
-/// Per-row log-softmax for a [B×C] matrix of logits.
-///
-/// Each row (sample) gets its own block.  Within the block, threads
-/// collaborate on the parallel reduction (max, then sum-of-exp).
-/// blockDim.x must be a power-of-two ≥ C.
+/**
+ * @brief Per-row log-softmax for a [B×C] matrix of logits.
+ *
+ * Each row (sample) gets its own block. Within the block, threads
+ * collaborate on parallel reductions (max, then sum-of-exp).
+ *
+ * @param logits  Input logit matrix (device pointer, B × C row-major).
+ * @param log_sm  Output log-softmax matrix (device pointer, B × C).
+ * @param C       Number of classes (columns).
+ */
 __global__ void batch_log_softmax(const float* logits, float* log_sm, int C) {
   extern __shared__ float sdata[];
   int b = blockIdx.x;  // sample index within the batch
@@ -167,22 +191,41 @@ __global__ void batch_log_softmax(const float* logits, float* log_sm, int C) {
   if (tid < C) log_sm[b * C + tid] = (val - mx) - lse;
 }
 
-/// Cross-entropy forward (batched): elem[b][i] = −target[b][i] · log_sm[b][i].
-/// The per-sample loss is the row-sum of elem.
+/**
+ * @brief Cross-entropy forward (batched): elem[i] = −target[i] * log_sm[i].
+ *
+ * @param log_sm  Log-softmax output (device pointer, length N).
+ * @param target  One-hot targets (device pointer, length N).
+ * @param elem    Per-element loss output (device pointer, length N).
+ * @param N       Total elements (B × C).
+ */
 __global__ void ce_fwd(const float* log_sm, const float* target, float* elem, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) elem[i] = -target[i] * log_sm[i];
 }
 
-/// Cross-entropy backward (batched):  grad[i] = softmax[i] − target[i].
-/// Combined softmax+CE gradient, applied element-wise to the B×C matrix.
+/**
+ * @brief Cross-entropy backward (batched): grad = softmax − target.
+ *
+ * @param log_sm  Log-softmax output (device pointer, length N).
+ * @param target  One-hot targets (device pointer, length N).
+ * @param grad    Output gradient (device pointer, length N).
+ * @param N       Total elements (B × C).
+ */
 __global__ void ce_bwd(const float* log_sm, const float* target, float* grad, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) grad[i] = expf(log_sm[i]) - target[i];
 }
 
-/// Reduce sum of a B×C element-loss matrix into a single scalar.
-/// A simple single-block reduction (fine for small B×C).
+/**
+ * @brief Reduce sum of a B×C element-loss matrix into a single scalar.
+ *
+ * Uses grid-stride accumulation followed by shared-memory reduction.
+ *
+ * @param in   Input array (device pointer, length N).
+ * @param out  Scalar sum output (device pointer, single float).
+ * @param N    Total number of elements.
+ */
 __global__ void reduce_sum_all(const float* in, float* out, int N) {
   extern __shared__ float sdata[];
   int tid = threadIdx.x;
@@ -198,11 +241,16 @@ __global__ void reduce_sum_all(const float* in, float* out, int N) {
   if (tid == 0) *out = sdata[0];
 }
 
-/// Sum columns of a [B×D] matrix → a vector of length D.
-/// Computes:  out[j] = Σ_b  in[b*D + j]   for each j.
-///
-/// Used to compute bias gradients: db = Σ_b dY[b,:].
-/// Each thread handles one column j and loops over rows.
+/**
+ * @brief Sum columns of a [B×D] matrix into a vector of length D.
+ *
+ * Used to compute bias gradients: db = Σ_b dY[b,:].
+ *
+ * @param in   Input matrix (device pointer, B × D row-major).
+ * @param out  Column-sum output vector (device pointer, length D).
+ * @param B    Number of rows (batch size).
+ * @param D    Number of columns (feature dimension).
+ */
 __global__ void col_sum(const float* in, float* out, int B, int D) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j < D) {
@@ -212,14 +260,28 @@ __global__ void col_sum(const float* in, float* out, int B, int D) {
   }
 }
 
-/// Scale every element by a constant:  x[i] *= scale.
-/// Used to average gradients over the batch: scale = 1/B.
+/**
+ * @brief Scale every element by a constant: x[i] *= scale.
+ *
+ * Used to average gradients over the batch (scale = 1/B).
+ *
+ * @param x      Array to scale in-place (device pointer, length N).
+ * @param scale  Scalar multiplier.
+ * @param N      Number of elements.
+ */
 __global__ void scale_kernel(float* x, float scale, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) x[i] *= scale;
 }
 
-/// SGD update: param[i] -= lr * grad[i].
+/**
+ * @brief SGD update: param[i] -= lr * grad[i].
+ *
+ * @param param  Parameter array to update in-place (device pointer, length N).
+ * @param grad   Gradient array (device pointer, length N).
+ * @param lr     Learning rate.
+ * @param N      Number of parameters.
+ */
 __global__ void sgd_update(float* param, const float* grad, float lr, int N) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < N) param[i] -= lr * grad[i];
@@ -229,16 +291,12 @@ __global__ void sgd_update(float* param, const float* grad, float lr, int N) {
 // BatchMLP — mini-batch MLP using cuBLAS for dense layers
 // =============================================================================
 
-/// A 2-layer MLP that processes B samples simultaneously.
-///
-/// Buffers are allocated for the maximum batch size up front.
-/// The computational graph for a batch:
-///
-///   X[B×4] →─[GEMM]→ Z1[B×16] + bias1 →─[ReLU]→ A1[B×16]
-///          →─[GEMM]→ Z2[B×3]  + bias2 →─[LogSoftmax]→ LS[B×3]
-///          →─[CE]──→ loss (scalar, averaged over B)
-///
-/// The backward pass reverses this, producing dW1, db1, dW2, db2.
+/**
+ * @brief Mini-batch 2-layer MLP using cuBLAS GEMM for dense layers.
+ *
+ * Processes B samples simultaneously via matrix multiplies.
+ * Buffers are allocated for the maximum batch size up front.
+ */
 struct BatchMLP {
   int in_dim{}, hid_dim{}, out_dim{}, max_batch{};
   cublasHandle_t cublas{};
@@ -330,27 +388,33 @@ struct BatchMLP {
     // One call processes all B samples simultaneously.
     gemm_rm(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(total1 + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- ReLU ---
     relu_fwd<<<(total1 + blk - 1) / blk, blk>>>(Z1, A1, total1);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- Layer 2: Z2 = A1 · W2 ---
     gemm_rm(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(total2 + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- Log-softmax (per-row) ---
     int sm_block = 1;
     while (sm_block < out_dim) sm_block <<= 1;
     batch_log_softmax<<<B, sm_block, static_cast<size_t>(sm_block) * sizeof(float)>>>(Z2, LS,
                                                                                       out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- Cross-entropy loss ---
     ce_fwd<<<(total2 + blk - 1) / blk, blk>>>(LS, d_target, elem_loss, total2);
+    CUDA_CHECK(cudaGetLastError());
 
     // Sum all B×C element losses into a single scalar, then average.
     int red_block = 256;
     reduce_sum_all<<<1, red_block, static_cast<size_t>(red_block) * sizeof(float)>>>(
         elem_loss, d_loss, total2);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     float h_loss;
@@ -383,6 +447,7 @@ struct BatchMLP {
 
     // --- dZ2 = softmax(Z2) − target  [B×out] ---
     ce_bwd<<<(total2 + blk - 1) / blk, blk>>>(LS, d_target, dZ2, total2);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- dW2 = (1/B) · A1^T · dZ2  [hid×out] ---
     // A1 is stored as [B×hid] row-major.  We need A1^T[hid×B] · dZ2[B×out].
@@ -391,7 +456,9 @@ struct BatchMLP {
 
     // --- db2 = (1/B) · col_sum(dZ2)  [out] ---
     col_sum<<<(out_dim + blk - 1) / blk, blk>>>(dZ2, db2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(out_dim + blk - 1) / blk, blk>>>(db2, inv_B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- dA1 = dZ2 · W2^T  [B×hid] ---
     // We need  dA1[B×hid] = dZ2[B×out] · W2^T[out×hid].
@@ -411,13 +478,16 @@ struct BatchMLP {
 
     // --- dZ1 = dA1 ⊙ relu'(Z1)  [B×hid] ---
     relu_bwd<<<(total1 + blk - 1) / blk, blk>>>(Z1, dA1, dZ1, total1);
+    CUDA_CHECK(cudaGetLastError());
 
     // --- dW1 = (1/B) · X^T · dZ1  [in×hid] ---
     gemm_rm_AT(cublas, in_dim, B, hid_dim, inv_B, d_X, dZ1, 0.0F, dW1);
 
     // --- db1 = (1/B) · col_sum(dZ1)  [hid] ---
     col_sum<<<(hid_dim + blk - 1) / blk, blk>>>(dZ1, db1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     scale_kernel<<<(hid_dim + blk - 1) / blk, blk>>>(db1, inv_B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaDeviceSynchronize());
   }
@@ -430,6 +500,7 @@ struct BatchMLP {
     int blk = 256;
     auto upd = [&](float* p, const float* g, int n) {
       sgd_update<<<(n + blk - 1) / blk, blk>>>(p, g, lr, n);
+      CUDA_CHECK(cudaGetLastError());
     };
     upd(W1, dW1, in_dim * hid_dim);
     upd(b1, db1, hid_dim);
@@ -451,9 +522,12 @@ struct BatchMLP {
 
     gemm_rm(cublas, B, in_dim, hid_dim, 1.0F, d_X, W1, 0.0F, Z1);
     add_bias<<<(total1 + blk - 1) / blk, blk>>>(Z1, b1, B, hid_dim);
+    CUDA_CHECK(cudaGetLastError());
     relu_fwd<<<(total1 + blk - 1) / blk, blk>>>(Z1, A1, total1);
+    CUDA_CHECK(cudaGetLastError());
     gemm_rm(cublas, B, hid_dim, out_dim, 1.0F, A1, W2, 0.0F, Z2);
     add_bias<<<(total2 + blk - 1) / blk, blk>>>(Z2, b2, B, out_dim);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy logits to host and argmax each row.
@@ -476,7 +550,7 @@ struct BatchMLP {
     cublasDestroy(cublas);
     for (float* p :
          {W1, b1, W2, b2, dW1, db1, dW2, db2, Z1, A1, Z2, LS, dZ2, dA1, dZ1, elem_loss, d_loss})
-      cudaFree(p);
+      CUDA_CHECK(cudaFree(p));
   }
 };
 

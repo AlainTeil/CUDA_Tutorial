@@ -8,13 +8,19 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 // ---- Kernels ----------------------------------------------------------------
@@ -88,15 +94,16 @@ static std::vector<float> gpu_apply(void (*fwd)(const float*, float*, int),
                                     const std::vector<float>& input) {
   int n = static_cast<int>(input.size());
   float *d_in, *d_out;
-  cudaMalloc(&d_in, n * sizeof(float));
-  cudaMalloc(&d_out, n * sizeof(float));
-  cudaMemcpy(d_in, input.data(), n * sizeof(float), cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d_in, n * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, n * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, input.data(), n * sizeof(float), cudaMemcpyHostToDevice));
   fwd<<<(n + 255) / 256, 256>>>(d_in, d_out, n);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
   std::vector<float> result(static_cast<size_t>(n));
-  cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaFree(d_in);
-  cudaFree(d_out);
+  CUDA_CHECK(cudaMemcpy(result.data(), d_out, n * sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
   return result;
 }
 
@@ -121,19 +128,21 @@ TEST(ActivationsTest, ReluBackwardFiniteDiff) {
   // Analytic grad
   std::vector<float> go(kN, 1.0F);
   float *d_in, *d_out, *d_go, *d_gi;
-  cudaMalloc(&d_in, kN * sizeof(float));
-  cudaMalloc(&d_out, kN * sizeof(float));
-  cudaMalloc(&d_go, kN * sizeof(float));
-  cudaMalloc(&d_gi, kN * sizeof(float));
-  cudaMemcpy(d_in, in.data(), kN * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_go, go.data(), kN * sizeof(float), cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d_in, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_go, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_gi, kN * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, in.data(), kN * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_go, go.data(), kN * sizeof(float), cudaMemcpyHostToDevice));
 
   relu_forward<<<1, 256>>>(d_in, d_out, kN);
+  CUDA_CHECK(cudaGetLastError());
   relu_backward<<<1, 256>>>(d_in, d_go, d_gi, kN);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> gi(kN);
-  cudaMemcpy(gi.data(), d_gi, kN * sizeof(float), cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(gi.data(), d_gi, kN * sizeof(float), cudaMemcpyDeviceToHost));
 
   // Numerical grad
   for (int i = 0; i < kN; ++i) {
@@ -151,10 +160,10 @@ TEST(ActivationsTest, ReluBackwardFiniteDiff) {
       EXPECT_NEAR(gi[static_cast<size_t>(i)], num, 0.1F) << "at " << i;
   }
 
-  cudaFree(d_in);
-  cudaFree(d_out);
-  cudaFree(d_go);
-  cudaFree(d_gi);
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
+  CUDA_CHECK(cudaFree(d_go));
+  CUDA_CHECK(cudaFree(d_gi));
 }
 
 // ---- Sigmoid Tests ----------------------------------------------------------
@@ -201,16 +210,17 @@ TEST(ActivationsTest, SoftmaxSumsToOne) {
   for (auto& v : in) v = static_cast<float>(rand() / static_cast<double>(RAND_MAX)) * 4.0F - 2.0F;
 
   float *d_in, *d_out;
-  cudaMalloc(&d_in, in.size() * sizeof(float));
-  cudaMalloc(&d_out, in.size() * sizeof(float));
-  cudaMemcpy(d_in, in.data(), in.size() * sizeof(float), cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d_in, in.size() * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, in.size() * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, in.data(), in.size() * sizeof(float), cudaMemcpyHostToDevice));
 
   int smem = 256 * static_cast<int>(sizeof(float));
   softmax_forward<<<kRows, 256, smem>>>(d_in, d_out, kCols);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> out(in.size());
-  cudaMemcpy(out.data(), d_out, out.size() * sizeof(float), cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(out.data(), d_out, out.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
   for (int r = 0; r < kRows; ++r) {
     float sum = 0;
@@ -222,8 +232,8 @@ TEST(ActivationsTest, SoftmaxSumsToOne) {
     EXPECT_NEAR(sum, 1.0F, 1e-5F) << "row " << r;
   }
 
-  cudaFree(d_in);
-  cudaFree(d_out);
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
 }
 
 TEST(ActivationsTest, SoftmaxAllEqual) {
@@ -231,19 +241,20 @@ TEST(ActivationsTest, SoftmaxAllEqual) {
   std::vector<float> in(kCols, 1.0F);
 
   float *d_in, *d_out;
-  cudaMalloc(&d_in, kCols * sizeof(float));
-  cudaMalloc(&d_out, kCols * sizeof(float));
-  cudaMemcpy(d_in, in.data(), kCols * sizeof(float), cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d_in, kCols * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, kCols * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, in.data(), kCols * sizeof(float), cudaMemcpyHostToDevice));
 
   int smem = 256 * static_cast<int>(sizeof(float));
   softmax_forward<<<1, 256, smem>>>(d_in, d_out, kCols);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> out(kCols);
-  cudaMemcpy(out.data(), d_out, kCols * sizeof(float), cudaMemcpyDeviceToHost);
+  CUDA_CHECK(cudaMemcpy(out.data(), d_out, kCols * sizeof(float), cudaMemcpyDeviceToHost));
 
   for (int c = 0; c < kCols; ++c) EXPECT_NEAR(out[static_cast<size_t>(c)], 0.2F, 1e-5F);
 
-  cudaFree(d_in);
-  cudaFree(d_out);
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
 }

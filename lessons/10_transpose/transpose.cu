@@ -55,15 +55,22 @@ constexpr int kTile = 32;
 // Naive transpose
 // =============================================================================
 
-/// @brief Naive transpose: coalesced reads, scattered writes.
-///
-/// Each thread reads `in[row * cols + col]` (coalesced, since consecutive
-/// threads have consecutive `col` values) and writes to
-/// `out[col * rows + row]` (scattered, since consecutive threads write
-/// to different columns of the output = different cache lines).
-///
-/// On a large matrix this achieves only ~50% of peak memory bandwidth
-/// due to the uncoalesced writes.
+/**
+ * @brief Naive transpose: coalesced reads, scattered writes.
+ *
+ * Each thread reads `in[row * cols + col]` (coalesced, since consecutive
+ * threads have consecutive `col` values) and writes to
+ * `out[col * rows + row]` (scattered, since consecutive threads write
+ * to different columns of the output = different cache lines).
+ *
+ * On a large matrix this achieves only ~50% of peak memory bandwidth
+ * due to the uncoalesced writes.
+ *
+ * @param in    Input matrix in row-major layout (rows × cols).
+ * @param out   Output matrix in row-major layout (cols × rows).
+ * @param rows  Number of rows in the input matrix.
+ * @param cols  Number of columns in the input matrix.
+ */
 __global__ void transpose_naive(const float* in, float* out, int rows, int cols) {
   int col = blockIdx.x * blockDim.x + threadIdx.x;
   int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -76,22 +83,29 @@ __global__ void transpose_naive(const float* in, float* out, int rows, int cols)
 // Tiled transpose (shared memory, bank-conflict-free)
 // =============================================================================
 
-/// @brief Tiled transpose: coalesced reads AND writes, no bank conflicts.
-///
-/// ### Step 1 — Load tile (coalesced read)
-/// Consecutive threads read consecutive columns of `in` into
-/// `tile[threadIdx.y][threadIdx.x]`.  This is coalesced.
-///
-/// ### Step 2 — Write transposed tile (coalesced write)
-/// We compute the output position by swapping `blockIdx.x` and `blockIdx.y`.
-/// Then we write `tile[threadIdx.x][threadIdx.y]` — note the swapped
-/// indices, which performs the transpose.  Consecutive threads have
-/// consecutive `threadIdx.x`, so they read consecutive shared-memory
-/// columns and write consecutive output addresses → coalesced.
-///
-/// The `kTile + 1` padding on the shared memory array prevents bank
-/// conflicts when reading the transposed access pattern
-/// `tile[threadIdx.x][threadIdx.y]`.
+/**
+ * @brief Tiled transpose: coalesced reads AND writes, no bank conflicts.
+ *
+ * ### Step 1 — Load tile (coalesced read)
+ * Consecutive threads read consecutive columns of `in` into
+ * `tile[threadIdx.y][threadIdx.x]`.  This is coalesced.
+ *
+ * ### Step 2 — Write transposed tile (coalesced write)
+ * We compute the output position by swapping `blockIdx.x` and `blockIdx.y`.
+ * Then we write `tile[threadIdx.x][threadIdx.y]` — note the swapped
+ * indices, which performs the transpose.  Consecutive threads have
+ * consecutive `threadIdx.x`, so they read consecutive shared-memory
+ * columns and write consecutive output addresses → coalesced.
+ *
+ * The `kTile + 1` padding on the shared memory array prevents bank
+ * conflicts when reading the transposed access pattern
+ * `tile[threadIdx.x][threadIdx.y]`.
+ *
+ * @param in    Input matrix in row-major layout (rows × cols).
+ * @param out   Output matrix in row-major layout (cols × rows).
+ * @param rows  Number of rows in the input matrix.
+ * @param cols  Number of columns in the input matrix.
+ */
 __global__ void transpose_tiled(const float* in, float* out, int rows, int cols) {
   // +1 column to avoid bank conflicts on 32-wide shared memory.
   __shared__ float tile[kTile][kTile + 1];
@@ -136,6 +150,7 @@ int main() {
 
   // Naive
   transpose_naive<<<blocks, threads>>>(d_in, d_out, kRows, kCols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_naive(static_cast<size_t>(kCols) * kRows);
@@ -143,6 +158,7 @@ int main() {
 
   // Tiled
   transpose_tiled<<<blocks, threads>>>(d_in, d_out, kRows, kCols);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> h_tiled(static_cast<size_t>(kCols) * kRows);

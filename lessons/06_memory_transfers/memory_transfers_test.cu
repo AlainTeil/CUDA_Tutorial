@@ -8,12 +8,18 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-#define CUDA_CHECK(call)                                      \
-  do {                                                        \
-    cudaError_t err_ = (call);                                \
-    ASSERT_EQ(err_, cudaSuccess) << cudaGetErrorString(err_); \
+#define CUDA_CHECK(call)                                                    \
+  do {                                                                      \
+    cudaError_t err_ = (call);                                              \
+    if (err_ != cudaSuccess) {                                              \
+      std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
+                   cudaGetErrorString(err_));                               \
+      std::abort();                                                         \
+    }                                                                       \
   } while (0)
 
 __global__ void scale_kernel(float* data, float factor, int n) {
@@ -29,45 +35,48 @@ static std::vector<float> run_pageable(int n, float factor) {
   for (int i = 0; i < n; ++i) h[static_cast<size_t>(i)] = static_cast<float>(i);
 
   float* d = nullptr;
-  cudaMalloc(&d, bytes);
-  cudaMemcpy(d, h.data(), bytes, cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d, bytes));
+  CUDA_CHECK(cudaMemcpy(d, h.data(), bytes, cudaMemcpyHostToDevice));
   scale_kernel<<<(n + 255) / 256, 256>>>(d, factor, n);
-  cudaMemcpy(h.data(), d, bytes, cudaMemcpyDeviceToHost);
-  cudaDeviceSynchronize();
-  cudaFree(d);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpy(h.data(), d, bytes, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaFree(d));
   return h;
 }
 
 static std::vector<float> run_pinned(int n, float factor) {
   size_t bytes = static_cast<size_t>(n) * sizeof(float);
   float* h = nullptr;
-  cudaMallocHost(&h, bytes);
+  CUDA_CHECK(cudaMallocHost(&h, bytes));
   for (int i = 0; i < n; ++i) h[i] = static_cast<float>(i);
 
   float* d = nullptr;
-  cudaMalloc(&d, bytes);
-  cudaMemcpy(d, h, bytes, cudaMemcpyHostToDevice);
+  CUDA_CHECK(cudaMalloc(&d, bytes));
+  CUDA_CHECK(cudaMemcpy(d, h, bytes, cudaMemcpyHostToDevice));
   scale_kernel<<<(n + 255) / 256, 256>>>(d, factor, n);
-  cudaMemcpy(h, d, bytes, cudaMemcpyDeviceToHost);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpy(h, d, bytes, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> result(h, h + n);
-  cudaFree(d);
-  cudaFreeHost(h);
+  CUDA_CHECK(cudaFree(d));
+  CUDA_CHECK(cudaFreeHost(h));
   return result;
 }
 
 static std::vector<float> run_unified(int n, float factor) {
   size_t bytes = static_cast<size_t>(n) * sizeof(float);
   float* data = nullptr;
-  cudaMallocManaged(&data, bytes);
+  CUDA_CHECK(cudaMallocManaged(&data, bytes));
   for (int i = 0; i < n; ++i) data[i] = static_cast<float>(i);
 
   scale_kernel<<<(n + 255) / 256, 256>>>(data, factor, n);
-  cudaDeviceSynchronize();
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   std::vector<float> result(data, data + n);
-  cudaFree(data);
+  CUDA_CHECK(cudaFree(data));
   return result;
 }
 

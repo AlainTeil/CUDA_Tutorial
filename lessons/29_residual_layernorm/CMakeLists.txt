@@ -1,0 +1,10 @@
+add_executable(29_residual_layernorm residual_layernorm.cu)
+target_link_libraries(29_residual_layernorm PRIVATE CUDA::cudart)
+set_project_warnings(29_residual_layernorm)
+
+if(CUDA_TUTORIAL_BUILD_TESTS)
+  add_executable(29_residual_layernorm_test residual_layernorm_test.cu)
+  target_link_libraries(29_residual_layernorm_test PRIVATE GTest::gtest_main CUDA::cudart)
+  set_project_warnings(29_residual_layernorm_test)
+  gtest_discover_tests(29_residual_layernorm_test)
+endif()

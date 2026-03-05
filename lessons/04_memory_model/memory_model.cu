@@ -78,6 +78,11 @@
  * `b[i]`, and writes `c[i]`.  Consecutive threads in a warp access
  * consecutive 4-byte addresses, which the memory controller merges into a
  * single 128-byte cache-line transaction.
+ *
+ * @param a  First input array (device pointer, length n).
+ * @param b  Second input array (device pointer, length n).
+ * @param c  Output array: c[i] = a[i] + b[i] (device pointer, length n).
+ * @param n  Number of elements.
  */
 __global__ void vector_add_global(const float* a, const float* b, float* c, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -108,6 +113,10 @@ __constant__ float kCoeffs[4];
  * comes from global memory (coalesced).  This is a common pattern in
  * physics simulations and neural networks where the same parameters are
  * applied to many data points.
+ *
+ * @param x  Input values (device pointer, length n).
+ * @param y  Output values: polynomial evaluated at each x[i] (device pointer, length n).
+ * @param n  Number of elements.
  */
 __global__ void poly_eval_constant(const float* x, float* y, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -146,6 +155,10 @@ constexpr int kBlockSize = 256;
  * this point before any thread can proceed past it.  Without it, some
  * threads might read shared memory locations that haven't been written yet
  * by other threads — a classic **race condition**.
+ *
+ * @param in   Input array (device pointer, length n).
+ * @param out  Output array with smoothed values (device pointer, length n).
+ * @param n    Number of elements.
  */
 __global__ void stencil_shared(const float* in, float* out, int n) {
   __shared__ float tile[kBlockSize + 2];  // +2 for left and right halo
@@ -199,6 +212,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(db, hb.data(), bytes, cudaMemcpyHostToDevice));
 
     vector_add_global<<<blocks, kThreads>>>(da, db, dc, kN);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(hc.data(), dc, bytes, cudaMemcpyDeviceToHost));
@@ -230,6 +244,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(dx, hx.data(), bytes, cudaMemcpyHostToDevice));
 
     poly_eval_constant<<<blocks, kThreads>>>(dx, dy, kN);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(hy.data(), dy, bytes, cudaMemcpyDeviceToHost));
@@ -258,6 +273,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(din, hin.data(), bytes, cudaMemcpyHostToDevice));
 
     stencil_shared<<<blocks, kBlockSize>>>(din, dout, kN);
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(hout.data(), dout, bytes, cudaMemcpyDeviceToHost));

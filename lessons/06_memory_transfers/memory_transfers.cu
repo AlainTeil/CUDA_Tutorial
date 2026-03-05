@@ -50,6 +50,16 @@
 // Kernel: scale every element by a constant
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Scale array elements by a constant factor: data[i] *= factor.
+ *
+ * Simple element-wise kernel used to demonstrate the three memory
+ * transfer strategies (pageable, pinned, unified).
+ *
+ * @param data    Array to scale in-place (device pointer, length n).
+ * @param factor  Scalar multiplier.
+ * @param n       Number of elements.
+ */
 __global__ void scale_kernel(float* data, float factor, int n) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < n) {
@@ -86,6 +96,7 @@ TimedResult run_pageable(int n, float factor) {
   CUDA_CHECK(cudaEventRecord(start));
   CUDA_CHECK(cudaMemcpy(d_data, h_data.data(), bytes, cudaMemcpyHostToDevice));
   scale_kernel<<<(n + 255) / 256, 256>>>(d_data, factor, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaMemcpy(h_data.data(), d_data, bytes, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaEventRecord(stop));
   CUDA_CHECK(cudaEventSynchronize(stop));
@@ -121,6 +132,7 @@ TimedResult run_pinned(int n, float factor) {
   CUDA_CHECK(cudaEventRecord(start));
   CUDA_CHECK(cudaMemcpy(d_data, h_data, bytes, cudaMemcpyHostToDevice));
   scale_kernel<<<(n + 255) / 256, 256>>>(d_data, factor, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaMemcpy(h_data, d_data, bytes, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaEventRecord(stop));
   CUDA_CHECK(cudaEventSynchronize(stop));
@@ -153,6 +165,7 @@ TimedResult run_unified(int n, float factor) {
 
   CUDA_CHECK(cudaEventRecord(start));
   scale_kernel<<<(n + 255) / 256, 256>>>(data, factor, n);
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaEventRecord(stop));
   CUDA_CHECK(cudaEventSynchronize(stop));
 

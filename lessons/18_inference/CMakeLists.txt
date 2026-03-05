@@ -1,4 +1,3 @@
-cmake_minimum_required(VERSION 3.20)
 
 add_executable(18_inference inference.cu)
 target_link_libraries(18_inference PRIVATE CUDA::cudart)

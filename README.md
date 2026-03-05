@@ -3,7 +3,7 @@
 A comprehensive, self-contained CUDA programming tutorial that progressively
 builds from device queries all the way through training and deploying a neural
 network entirely on the GPU.  Every lesson includes a pedagogical source file
-and a companion unit-test file (188 tests in total, powered by Google Test).
+and a companion unit-test file (powered by Google Test).
 
 ## Prerequisites
 
@@ -85,16 +85,16 @@ cmake -B build -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" \
 | # | Lesson | Key Concepts |
 |---|--------|-------------|
 | 08 | Parallel Reduction | Shared-memory tree reduction, `__shfl_down_sync` |
-| 09 | Prefix Sum (Scan) | Blelloch inclusive/exclusive scan |
+| 09 | Prefix Sum (Scan) | Blelloch work-efficient exclusive scan |
 | 10 | Matrix Transpose | Bank-conflict-free shared-memory tiling |
-| 11 | Tiled Matrix Multiply | Shared-memory tiles, register blocking |
+| 11 | Tiled Matrix Multiply | Shared-memory tiles, tiled dot-product |
 
 ### Phase 3 — Deep Learning Primitives
 | # | Lesson | Key Concepts |
 |---|--------|-------------|
 | 12 | Dense Layer | Forward & backward pass, `Y = XW + b` |
 | 13 | Activation Functions | ReLU, Sigmoid, Tanh, Softmax (forward + backward) |
-| 14 | 2-D Convolution | Direct convolution kernel |
+| 14 | 2-D Convolution | Direct convolution, im2col + GEMM |
 | 15 | Pooling Layers | Max-pool & average-pool forward/backward, index tracking |
 | 16 | Loss Functions | MSE, log-softmax, cross-entropy (forward + backward) |
 
@@ -107,6 +107,20 @@ cmake -B build -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" \
 | 20 | Mini-Batch Training | cuBLAS GEMM batched forward/backward, gradient averaging |
 | 21 | Mixed Precision | FP16 `__half`, TF32 Tensor Cores, `cublasGemmEx`, loss scaling |
 | 22 | Performance Measurement | `cudaEvent_t` benchmarking, bandwidth/GFLOPS, roofline model |
+
+### Phase 5 — Advanced CUDA & Deep Learning
+| # | Lesson | Key Concepts |
+|---|--------|-------------|
+| 23 | Batch Normalization | Mean/variance kernels, forward/backward, running stats |
+| 24 | Dropout | Hash-based PRNG (Philox-style), inverted scaling, mask generation |
+| 25 | Optimizers | SGD + momentum, Adam, AdamW, cosine & warmup LR schedules |
+| 26 | Cooperative Groups | `tiled_partition`, `cg::reduce`, `coalesced_threads`, grid-level sync |
+| 27 | CUDA Graphs | Stream capture, explicit graph construction, graph update |
+| 28 | Embeddings | Token embedding gather/scatter, sinusoidal PE, cuBLAS projection |
+| 29 | Residual + LayerNorm | Residual connections, Welford's online algorithm, fused kernel |
+| 30 | GRU | Gated Recurrent Unit, cuBLAS GEMM, BPTT backward loop |
+| 31 | Self-Attention | Multi-head attention, split/merge heads, batched GEMM, softmax |
+| 32 | Transformer Encoder | Capstone: full encoder block, backward pass, Adam optimizer, end-to-end training |
 
 ## Project Structure
 
@@ -127,7 +141,17 @@ CUDA_Tutorial/
     │   └── device_query_test.cu
     ├── 02_hello_kernel/
     │   └── ...
-    └── ...
+    ├── ...
+    ├── 23_batch_normalization/
+    ├── 24_dropout/
+    ├── 25_optimizers/
+    ├── 26_cooperative_groups/
+    ├── 27_cuda_graphs/
+    ├── 28_embeddings/
+    ├── 29_residual_layernorm/
+    ├── 30_gru/
+    ├── 31_self_attention/
+    └── 32_transformer/
 ```
 
 ## License
