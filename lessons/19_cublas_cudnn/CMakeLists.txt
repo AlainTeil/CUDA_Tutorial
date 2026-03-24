@@ -32,5 +32,5 @@ if(CUDA_TUTORIAL_BUILD_TESTS)
     target_compile_definitions(19_cublas_cudnn_test PRIVATE HAS_CUDNN=1)
   endif()
 
-  gtest_discover_tests(19_cublas_cudnn_test)
+  gtest_discover_tests(19_cublas_cudnn_test TEST_PREFIX "19_cublas_cudnn/")
 endif()

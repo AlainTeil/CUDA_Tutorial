@@ -23,7 +23,7 @@ and a companion unit-test file (powered by Google Test).
 ## Quick Start
 
 ```bash
-# Configure (tests and docs targets are ON by default)
+# Configure (tests ON by default; docs OFF with presets, ON otherwise)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 
 # Build all lessons + tests
@@ -31,6 +31,9 @@ cmake --build build -j$(nproc)
 
 # Run all tests
 ctest --test-dir build --output-on-failure -j4
+
+# Run tests for a single lesson
+ctest --test-dir build -R 01_device_query --output-on-failure
 
 # Format all source files (requires clang-format)
 cmake --build build --target format
