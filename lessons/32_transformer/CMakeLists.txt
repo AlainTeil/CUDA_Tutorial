@@ -1,5 +1,5 @@
 
-find_package(CUDAToolkit REQUIRED)
+# CUDAToolkit already found at project root.
 
 add_executable(32_transformer transformer.cu)
 target_link_libraries(32_transformer PRIVATE CUDA::cudart CUDA::cublas)

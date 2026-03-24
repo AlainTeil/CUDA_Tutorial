@@ -53,7 +53,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -63,7 +63,7 @@
 
 #define CUBLAS_CHECK(call)                                                          \
   do {                                                                              \
-    cublasStatus_t st_ = (call);                                                    \
+    const cublasStatus_t st_ = (call);                                              \
     if (st_ != CUBLAS_STATUS_SUCCESS) {                                             \
       std::fprintf(stderr, "cuBLAS error at %s:%d — code %d\n", __FILE__, __LINE__, \
                    static_cast<int>(st_));                                          \
@@ -99,6 +99,7 @@ __global__ void embedding_forward_kernel(const float* __restrict__ table,
   int col = idx % D;
   int token_id = ids[row];
   assert(token_id >= 0 && token_id < V && "token ID out of range");
+  (void)V;
   out[row * D + col] = table[token_id * D + col];
 }
 
@@ -123,7 +124,7 @@ __global__ void sinusoidal_pe_kernel(float* __restrict__ data, int T, int D, int
   int col = idx % D;
   int pos = row % T;
 
-  float exponent = static_cast<float>(col / 2 * 2) / static_cast<float>(D);
+  float exponent = static_cast<float>((col / 2) * 2) / static_cast<float>(D);
   float freq = 1.0F / powf(kPEBase, exponent);
   float angle = static_cast<float>(pos) * freq;
 

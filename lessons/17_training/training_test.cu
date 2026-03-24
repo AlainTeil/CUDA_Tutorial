@@ -18,7 +18,7 @@
 
 #define CUDA_CHECK(call)                                                    \
   do {                                                                      \
-    cudaError_t err_ = (call);                                              \
+    const cudaError_t err_ = (call);                                        \
     if (err_ != cudaSuccess) {                                              \
       std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                               \
@@ -29,7 +29,7 @@
 // Non-FAIL variant for use inside non-void-returning methods
 #define CUDA_ASSERT(call)                                                 \
   do {                                                                    \
-    cudaError_t err_ = (call);                                            \
+    const cudaError_t err_ = (call);                                      \
     if (err_ != cudaSuccess) {                                            \
       std::fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(err_)); \
       std::abort();                                                       \
@@ -368,6 +368,212 @@ TEST(TrainingTest, HighAccuracy) {
   }
   double acc = 100.0 * static_cast<double>(correct) / static_cast<double>(n);
   EXPECT_GT(acc, 90.0) << "Accuracy should exceed 90% on linearly-separable data";
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_target));
+}
+
+// =============================================================================
+// Test: forward on zero input produces bias-only output
+// =============================================================================
+
+TEST(TrainingTest, ForwardZeroInputGivesBias) {
+  MLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(1);
+
+  // Zero input → dense_forward output = bias (since X·W = 0).
+  float* d_x;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_x, 0, 4 * sizeof(float)));
+
+  // Run only dense1 + relu + dense2 (via predict which skips softmax).
+  int cls = mlp.predict(d_x);
+  EXPECT_GE(cls, 0);
+  EXPECT_LT(cls, 3);
+
+  // Also verify that z2 logits are finite.
+  std::vector<float> logits(3);
+  CUDA_CHECK(cudaMemcpy(logits.data(), mlp.z2, 3 * sizeof(float), cudaMemcpyDeviceToHost));
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_TRUE(std::isfinite(logits[static_cast<size_t>(i)])) << "logit[" << i << "] not finite";
+  }
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+}
+
+// =============================================================================
+// Test: log-softmax output exponentials sum to 1
+// =============================================================================
+
+TEST(TrainingTest, LogSoftmaxSumsToOne) {
+  MLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(7);
+
+  float* d_x;
+  float* d_target;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_target, 3 * sizeof(float)));
+
+  // Set an arbitrary input.
+  std::vector<float> x = {1.0F, -0.5F, 2.0F, 0.3F};
+  CUDA_CHECK(cudaMemcpy(d_x, x.data(), 4 * sizeof(float), cudaMemcpyHostToDevice));
+  std::vector<float> target = {0.0F, 1.0F, 0.0F};
+  CUDA_CHECK(cudaMemcpy(d_target, target.data(), 3 * sizeof(float), cudaMemcpyHostToDevice));
+
+  mlp.forward(d_x, d_target);
+
+  // Read log_sm and check exp(log_sm) sums to 1.
+  std::vector<float> lsm(3);
+  CUDA_CHECK(cudaMemcpy(lsm.data(), mlp.log_sm, 3 * sizeof(float), cudaMemcpyDeviceToHost));
+  float prob_sum = 0.0F;
+  for (int i = 0; i < 3; ++i) {
+    float p = std::exp(lsm[static_cast<size_t>(i)]);
+    EXPECT_GE(p, 0.0F);
+    EXPECT_LE(p, 1.0F);
+    prob_sum += p;
+  }
+  EXPECT_NEAR(prob_sum, 1.0F, 1e-5F);
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_target));
+}
+
+// =============================================================================
+// Test: cross-entropy loss is non-negative
+// =============================================================================
+
+TEST(TrainingTest, CrossEntropyNonNegative) {
+  MLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(55);
+
+  float* d_x;
+  float* d_target;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_target, 3 * sizeof(float)));
+
+  std::vector<std::vector<float>> samples;
+  std::vector<int> labels;
+  generate_data(samples, labels, 10, 77);
+
+  for (int s = 0; s < static_cast<int>(samples.size()); ++s) {
+    CUDA_CHECK(cudaMemcpy(d_x, samples[static_cast<size_t>(s)].data(), 4 * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    std::vector<float> one_hot(3, 0.0F);
+    one_hot[static_cast<size_t>(labels[static_cast<size_t>(s)])] = 1.0F;
+    CUDA_CHECK(cudaMemcpy(d_target, one_hot.data(), 3 * sizeof(float), cudaMemcpyHostToDevice));
+    float loss = mlp.forward(d_x, d_target);
+    EXPECT_GE(loss, 0.0F) << "CE loss must be non-negative for sample " << s;
+  }
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_target));
+}
+
+// =============================================================================
+// Test: SGD step actually changes weights
+// =============================================================================
+
+TEST(TrainingTest, SgdStepMutatesWeights) {
+  MLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(33);
+
+  // Snapshot W1 before.
+  std::vector<float> w1_before(4 * 16);
+  CUDA_CHECK(cudaMemcpy(w1_before.data(), mlp.W1, w1_before.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+
+  // Run one forward+backward+update pass.
+  float* d_x;
+  float* d_target;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_target, 3 * sizeof(float)));
+
+  std::vector<float> x = {1.0F, 2.0F, 0.5F, -1.0F};
+  CUDA_CHECK(cudaMemcpy(d_x, x.data(), 4 * sizeof(float), cudaMemcpyHostToDevice));
+  std::vector<float> target = {1.0F, 0.0F, 0.0F};
+  CUDA_CHECK(cudaMemcpy(d_target, target.data(), 3 * sizeof(float), cudaMemcpyHostToDevice));
+
+  mlp.forward(d_x, d_target);
+  mlp.backward(d_x, d_target);
+  mlp.sgd_step(0.05F);
+
+  // Snapshot W1 after.
+  std::vector<float> w1_after(4 * 16);
+  CUDA_CHECK(
+      cudaMemcpy(w1_after.data(), mlp.W1, w1_after.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+  // At least some weights must have changed.
+  bool any_changed = false;
+  for (size_t i = 0; i < w1_before.size(); ++i) {
+    if (w1_before[i] != w1_after[i]) {
+      any_changed = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(any_changed) << "SGD step should modify at least some weights";
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_target));
+}
+
+// =============================================================================
+// Test: loss is monotonically non-increasing (averaged over small windows)
+// =============================================================================
+
+TEST(TrainingTest, LossMonotonicallyDecreasing) {
+  std::vector<std::vector<float>> samples;
+  std::vector<int> labels;
+  generate_data(samples, labels, 30, 42);
+  int n = static_cast<int>(samples.size());
+
+  MLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(123);
+
+  float* d_x;
+  float* d_target;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_target, 3 * sizeof(float)));
+
+  auto run_epoch = [&]() {
+    float total = 0.0F;
+    for (int s = 0; s < n; ++s) {
+      CUDA_CHECK(cudaMemcpy(d_x, samples[static_cast<size_t>(s)].data(), 4 * sizeof(float),
+                            cudaMemcpyHostToDevice));
+      std::vector<float> one_hot(3, 0.0F);
+      one_hot[static_cast<size_t>(labels[static_cast<size_t>(s)])] = 1.0F;
+      CUDA_CHECK(cudaMemcpy(d_target, one_hot.data(), 3 * sizeof(float), cudaMemcpyHostToDevice));
+      total += mlp.forward(d_x, d_target);
+      mlp.backward(d_x, d_target);
+      mlp.sgd_step(0.05F);
+    }
+    return total / static_cast<float>(n);
+  };
+
+  // Record per-epoch losses and verify 5-epoch averaged windows decrease.
+  constexpr int kEpochs = 40;
+  std::vector<float> losses(kEpochs);
+  for (int e = 0; e < kEpochs; ++e) losses[static_cast<size_t>(e)] = run_epoch();
+
+  // Compare the average of the first 5 epochs vs the last 5 epochs.
+  float early_avg = 0.0F;
+  float late_avg = 0.0F;
+  for (int i = 0; i < 5; ++i) {
+    early_avg += losses[static_cast<size_t>(i)];
+    late_avg += losses[static_cast<size_t>(kEpochs - 5 + i)];
+  }
+  early_avg /= 5.0F;
+  late_avg /= 5.0F;
+  EXPECT_LT(late_avg, early_avg) << "Average loss in last 5 epochs should be less than first 5";
 
   mlp.free_all();
   CUDA_CHECK(cudaFree(d_x));

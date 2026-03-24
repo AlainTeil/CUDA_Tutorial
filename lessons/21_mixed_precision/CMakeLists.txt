@@ -1,5 +1,5 @@
 
-find_package(CUDAToolkit REQUIRED)
+# CUDAToolkit already found at project root.
 
 add_executable(21_mixed_precision mixed_precision.cu)
 target_link_libraries(21_mixed_precision PRIVATE CUDA::cudart CUDA::cublas)

@@ -1,5 +1,5 @@
 
-find_package(CUDAToolkit REQUIRED)
+# CUDAToolkit already found at project root.
 
 add_executable(30_gru gru.cu)
 target_link_libraries(30_gru PRIVATE CUDA::cudart CUDA::cublas)

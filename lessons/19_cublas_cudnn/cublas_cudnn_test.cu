@@ -18,7 +18,7 @@
 
 #define CUDA_CHECK(call)                                                    \
   do {                                                                      \
-    cudaError_t err_ = (call);                                              \
+    const cudaError_t err_ = (call);                                        \
     if (err_ != cudaSuccess) {                                              \
       std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                               \
@@ -28,7 +28,7 @@
 
 #define CUBLAS_CHECK(call)                                                    \
   do {                                                                        \
-    cublasStatus_t st_ = (call);                                              \
+    const cublasStatus_t st_ = (call);                                        \
     if (st_ != CUBLAS_STATUS_SUCCESS) {                                       \
       std::fprintf(stderr, "cuBLAS error at %s:%d: %d\n", __FILE__, __LINE__, \
                    static_cast<int>(st_));                                    \
@@ -39,7 +39,7 @@
 #ifdef HAS_CUDNN
 #define CUDNN_CHECK(call)                                                                   \
   do {                                                                                      \
-    cudnnStatus_t st_ = (call);                                                             \
+    const cudnnStatus_t st_ = (call);                                                       \
     if (st_ != CUDNN_STATUS_SUCCESS) FAIL() << "cuDNN error: " << cudnnGetErrorString(st_); \
   } while (0)
 #endif

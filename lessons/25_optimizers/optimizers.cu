@@ -62,7 +62,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -134,9 +134,16 @@ __global__ void adam_step_kernel(float* __restrict__ param, const float* __restr
   if (i >= n) return;
 
   float g = grad[i];
+  // Exponential moving averages of gradient (1st moment) and squared
+  // gradient (2nd moment).  Initialised to zero, so early estimates are
+  // biased toward 0.
   m[i] = beta1 * m[i] + (1.0F - beta1) * g;
   v[i] = beta2 * v[i] + (1.0F - beta2) * g * g;
 
+  // ---------- bias correction (Kingma & Ba, 2014) ----------
+  // After t steps:  E[m_t] = (1 - beta1^t) * E[g]   (geometric series).
+  // Dividing by (1 - beta1^t) recovers the unbiased estimate m_hat.
+  // Same logic applies to v_hat with beta2.
   float bc1 = 1.0F - powf(beta1, static_cast<float>(t));
   float bc2 = 1.0F - powf(beta2, static_cast<float>(t));
   float m_hat = m[i] / bc1;
@@ -309,8 +316,9 @@ int main() {
     CUDA_CHECK(cudaFree(d_v));
   }
 
-  // ---- AdamW ----------------------------------------------------------------
+  // ---- AdamW + Warmup-Cosine Schedule ----------------------------------------
   {
+    constexpr int kWarmup = 500;
     float *d_p, *d_g, *d_m, *d_v;
     CUDA_CHECK(cudaMalloc(&d_p, 2 * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_g, 2 * sizeof(float)));
@@ -322,17 +330,20 @@ int main() {
     CUDA_CHECK(cudaMemset(d_v, 0, 2 * sizeof(float)));
 
     for (int t = 1; t <= kSteps; ++t) {
+      // Apply warmup-cosine schedule: ramps LR linearly for kWarmup steps,
+      // then decays via cosine annealing to eta_min.
+      float lr_t = warmup_cosine_lr(kLR, 1e-5F, t, kWarmup, kSteps);
       float g[2];
       rosenbrock_grad(p[0], p[1], g[0], g[1]);
       CUDA_CHECK(cudaMemcpy(d_g, g, 2 * sizeof(float), cudaMemcpyHostToDevice));
-      adamw_step_kernel<<<1, 2>>>(d_p, d_g, d_m, d_v, 2, kLR, 0.9F, 0.999F, 1e-8F, 0.01F, t);
+      adamw_step_kernel<<<1, 2>>>(d_p, d_g, d_m, d_v, 2, lr_t, 0.9F, 0.999F, 1e-8F, 0.01F, t);
       CUDA_CHECK(cudaGetLastError());
       CUDA_CHECK(cudaDeviceSynchronize());
       CUDA_CHECK(cudaMemcpy(p, d_p, 2 * sizeof(float), cudaMemcpyDeviceToHost));
     }
     float loss =
         (1.0F - p[0]) * (1.0F - p[0]) + 100.0F * (p[1] - p[0] * p[0]) * (p[1] - p[0] * p[0]);
-    std::printf("AdamW(wd=.01): (%.6f, %.6f)  loss = %.8f\n", static_cast<double>(p[0]),
+    std::printf("AdamW+WarmCos: (%.6f, %.6f)  loss = %.8f\n", static_cast<double>(p[0]),
                 static_cast<double>(p[1]), static_cast<double>(loss));
     CUDA_CHECK(cudaFree(d_p));
     CUDA_CHECK(cudaFree(d_g));

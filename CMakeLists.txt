@@ -99,6 +99,27 @@ if(CLANG_FORMAT_EXE)
 endif()
 
 # ---------------------------------------------------------------------------
+# clang-tidy target  (static analysis; requires compile_commands.json)
+# ---------------------------------------------------------------------------
+find_program(CLANG_TIDY_EXE NAMES clang-tidy)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(CLANG_TIDY_EXE AND Python3_FOUND)
+  file(GLOB_RECURSE TIDY_SOURCE_FILES
+    ${CMAKE_SOURCE_DIR}/lessons/*.cu
+    ${CMAKE_SOURCE_DIR}/lessons/*.cpp
+  )
+  add_custom_target(tidy
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/cmake/run_clang_tidy.py
+            ${CMAKE_BINARY_DIR}
+            ${CLANG_TIDY_EXE}
+            ${TIDY_SOURCE_FILES}
+    COMMENT "Running clang-tidy on all source files (sanitised for CUDA)"
+    VERBATIM
+  )
+endif()
+
+# ---------------------------------------------------------------------------
 # Doxygen target
 # ---------------------------------------------------------------------------
 if(CUDA_TUTORIAL_BUILD_DOCS)

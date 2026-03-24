@@ -55,7 +55,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -241,6 +241,14 @@ __global__ void layernorm_backward_kernel(const float* __restrict__ dy, const fl
   for (int d = threadIdx.x; d < D; d += blockDim.x) {
     float x_hat = (x_row[d] - mu) * inv_std;
     float dxhat = dy_row[d] * gamma[d];
+    // ---------- derivation of dx for layer normalisation ----------
+    // Forward:  x_hat = (x - mu) * inv_std,   mu = mean(x),  inv_std = 1/std(x)
+    // dL/dx = inv_std * [ dxhat - (1/D) * sum(dxhat)
+    //                            - (1/D) * x_hat * sum(dxhat * x_hat) ]
+    // The two correction terms arise because mu and std depend on x;
+    // they redistribute the gradient to keep the output mean-centred
+    // and unit-variance, analogous to the BatchNorm formula over the D
+    // dimension instead of the N dimension.
     dx[row * D + d] = inv_std * (dxhat - inv_D * (sum_dxhat + x_hat * sum_dxhat_xhat));
 
     // Accumulate dgamma, dbeta across rows

@@ -65,7 +65,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -160,13 +160,15 @@ struct BenchmarkResult {
   /// Compute derived metrics.
   /// @param bytes  Total bytes read + written by the kernel.
   /// @return Effective bandwidth in GB/s, using the **median** time.
-  float bandwidth_gb_s(size_t bytes) const {
+  [[nodiscard]] float bandwidth_gb_s(size_t bytes) const {
     return static_cast<float>(bytes) / (median_ms * 1e6F);  // ms → s, bytes → GB
   }
 
   /// @param flops  Total floating-point operations.
   /// @return Arithmetic throughput in GFLOPS, using the **median** time.
-  float gflops(size_t flops) const { return static_cast<float>(flops) / (median_ms * 1e6F); }
+  [[nodiscard]] float gflops(size_t flops) const {
+    return static_cast<float>(flops) / (median_ms * 1e6F);
+  }
 };
 
 /// Compute `BenchmarkResult` from a vector of per-trial timings.
@@ -202,9 +204,18 @@ static BenchmarkResult compute_stats(std::vector<float>& times) {
 static float theoretical_peak_bw_gb_s(int device = 0) {
   cudaDeviceProp prop{};
   CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-  // memoryClockRate was removed from cudaDeviceProp in CUDA 13; query via attribute.
+  // memoryClockRate was removed from cudaDeviceProp in CUDA 13; query via
+  // attribute.  On CUDA 13.1+ the attribute itself may also be unavailable
+  // (returns cudaErrorInvalidValue), so we fall back to a conservative
+  // default of 1 GHz if the query fails.
   int mem_clock_khz = 0;
-  CUDA_CHECK(cudaDeviceGetAttribute(&mem_clock_khz, cudaDevAttrMemoryClockRate, device));
+  cudaError_t mem_err = cudaDeviceGetAttribute(&mem_clock_khz, cudaDevAttrMemoryClockRate, device);
+  if (mem_err != cudaSuccess || mem_clock_khz <= 0) {
+    // Clear the error and use a conservative 1 GHz fallback.
+    cudaGetLastError();
+    mem_clock_khz = 1000000;  // 1 GHz in kHz
+    std::fprintf(stderr, "Warning: could not query memory clock rate — using 1 GHz fallback.\n");
+  }
   // mem_clock_khz is in kHz, memoryBusWidth in bits.
   double bw = static_cast<double>(mem_clock_khz) * 1e3            // kHz → Hz
               * (static_cast<double>(prop.memoryBusWidth) / 8.0)  // bits → bytes
@@ -240,8 +251,14 @@ static float estimated_peak_gflops(int device = 0) {
   }
 
   // clockRate was removed from cudaDeviceProp in CUDA 13; query via attribute.
+  // Fall back to a conservative 1 GHz if the query fails on newer toolkits.
   int clock_khz = 0;
-  CUDA_CHECK(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device));
+  cudaError_t clk_err = cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device);
+  if (clk_err != cudaSuccess || clock_khz <= 0) {
+    cudaGetLastError();
+    clock_khz = 1000000;  // 1 GHz in kHz
+    std::fprintf(stderr, "Warning: could not query clock rate — using 1 GHz fallback.\n");
+  }
   double gflops = static_cast<double>(prop.multiProcessorCount) *
                   static_cast<double>(cores_per_sm) * static_cast<double>(clock_khz) *
                   1e3     // kHz → Hz

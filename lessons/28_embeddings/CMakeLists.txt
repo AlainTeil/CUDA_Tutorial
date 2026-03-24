@@ -1,5 +1,5 @@
 
-find_package(CUDAToolkit REQUIRED)
+# CUDAToolkit already found at project root.
 
 add_executable(28_embeddings embeddings.cu)
 target_link_libraries(28_embeddings PRIVATE CUDA::cudart CUDA::cublas)

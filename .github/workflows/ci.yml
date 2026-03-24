@@ -1,0 +1,54 @@
+# =============================================================================
+# CUDA Tutorial — CI pipeline
+# =============================================================================
+# Requires a self-hosted runner with an NVIDIA GPU and the CUDA Toolkit
+# installed, **or** a GitHub-hosted GPU runner (e.g. `ubuntu-gpu-latest`).
+# Adjust the `runs-on` label and `CUDA_ARCHITECTURES` to match your setup.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # --------------------------------------------------------------------------
+  build-and-test:
+    name: Build & Test (CUDA)
+    runs-on: [self-hosted, linux, gpu]   # Adjust label to your runner fleet
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print environment
+        run: |
+          nvidia-smi
+          nvcc --version
+          cmake --version
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release -j$(nproc)
+
+      - name: Test
+        run: ctest --preset release
+
+  # --------------------------------------------------------------------------
+  format-check:
+    name: clang-format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          find lessons -name '*.cu' -o -name '*.cpp' -o -name '*.h' -o -name '*.cuh' \
+            | xargs clang-format --dry-run --Werror

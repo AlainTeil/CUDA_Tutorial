@@ -25,7 +25,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -73,10 +73,12 @@ struct BenchmarkResult {
   float mean_ms{};
   int trials{};
 
-  float bandwidth_gb_s(size_t bytes) const {
+  [[nodiscard]] float bandwidth_gb_s(size_t bytes) const {
     return static_cast<float>(bytes) / (median_ms * 1e6F);
   }
-  float gflops(size_t flops) const { return static_cast<float>(flops) / (median_ms * 1e6F); }
+  [[nodiscard]] float gflops(size_t flops) const {
+    return static_cast<float>(flops) / (median_ms * 1e6F);
+  }
 };
 
 static BenchmarkResult compute_stats(std::vector<float>& times) {
@@ -426,4 +428,165 @@ TEST(PerformanceMeasurement, RooflineClassification) {
   // Heavy compute: AI = (256×2)/8 = 64 — should be compute-bound.
   float ai_heavy = static_cast<float>(COMPUTE_ITERS * 2) / 8.0F;
   EXPECT_GT(ai_heavy, ridge) << "Heavy compute should be compute-bound (ridge = " << ridge << ")";
+}
+
+/// --- 15. Heavy compute kernel produces correct results --->
+TEST(PerformanceMeasurement, HeavyComputeCorrectness) {
+  constexpr int N = 512;
+  std::vector<float> h_x(N), h_y(N);
+  for (int i = 0; i < N; ++i) h_x[static_cast<size_t>(i)] = static_cast<float>(i) * 0.01F;
+
+  float *d_x, *d_y;
+  size_t bytes = N * sizeof(float);
+  CUDA_CHECK(cudaMalloc(&d_x, bytes));
+  CUDA_CHECK(cudaMalloc(&d_y, bytes));
+  CUDA_CHECK(cudaMemcpy(d_x, h_x.data(), bytes, cudaMemcpyHostToDevice));
+
+  heavy_compute_kernel<<<(N + 255) / 256, 256>>>(d_x, d_y, N);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaMemcpy(h_y.data(), d_y, bytes, cudaMemcpyDeviceToHost));
+
+  // Verify against CPU reference.
+  for (int i = 0; i < N; ++i) {
+    float val = h_x[static_cast<size_t>(i)];
+    for (int iter = 0; iter < COMPUTE_ITERS; ++iter) val = val * 0.9999F + 0.0001F;
+    EXPECT_NEAR(h_y[static_cast<size_t>(i)], val, 1e-4F) << "Mismatch at index " << i;
+  }
+
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_y));
+}
+
+/// --- 16. GpuTimer works on non-default stream --->
+TEST(PerformanceMeasurement, GpuTimerNonDefaultStream) {
+  cudaStream_t stream;
+  CUDA_CHECK(cudaStreamCreate(&stream));
+
+  float *d_a, *d_b, *d_c;
+  constexpr int N = 1024;
+  CUDA_CHECK(cudaMalloc(&d_a, N * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_b, N * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_c, N * sizeof(float)));
+
+  GpuTimer timer;
+  timer.start(stream);
+  vector_add_kernel<<<(N + 255) / 256, 256, 0, stream>>>(d_a, d_b, d_c, N);
+  CUDA_CHECK(cudaGetLastError());
+  timer.stop(stream);
+  float ms = timer.elapsed_ms();
+  EXPECT_GT(ms, 0.0F) << "Timer on non-default stream should report positive time";
+
+  CUDA_CHECK(cudaStreamDestroy(stream));
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_c));
+}
+
+/// --- 17. compute_stats single sample --->
+TEST(PerformanceMeasurement, ComputeStatsSingleSample) {
+  std::vector<float> times = {7.5F};
+  auto r = compute_stats(times);
+  EXPECT_EQ(r.trials, 1);
+  EXPECT_FLOAT_EQ(r.min_ms, 7.5F);
+  EXPECT_FLOAT_EQ(r.max_ms, 7.5F);
+  EXPECT_FLOAT_EQ(r.median_ms, 7.5F);
+  EXPECT_FLOAT_EQ(r.mean_ms, 7.5F);
+}
+
+/// --- 18. Stats invariant: min ≤ median ≤ max --->
+TEST(PerformanceMeasurement, StatsInvariantOrdering) {
+  std::vector<float> times = {10.0F, 1.0F, 100.0F, 50.0F, 5.0F, 80.0F, 20.0F};
+  auto r = compute_stats(times);
+  EXPECT_LE(r.min_ms, r.median_ms);
+  EXPECT_LE(r.median_ms, r.max_ms);
+  EXPECT_GE(r.mean_ms, r.min_ms);
+  EXPECT_LE(r.mean_ms, r.max_ms);
+}
+
+/// --- 19. Reduction with non-power-of-two count --->
+TEST(PerformanceMeasurement, ReductionNonPowerOfTwo) {
+  constexpr int N = 1000;
+  std::vector<float> h_in(N);
+  for (int i = 0; i < N; ++i) h_in[static_cast<size_t>(i)] = 0.5F;
+  float expected = 500.0F;
+
+  float *d_in, *d_out;
+  CUDA_CHECK(cudaMalloc(&d_in, N * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, h_in.data(), N * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_out, 0, sizeof(float)));
+
+  int blk = 256;
+  int grid = (N + blk - 1) / blk;
+  reduce_sum_kernel<<<grid, blk, static_cast<size_t>(blk) * sizeof(float)>>>(d_in, d_out, N);
+  CUDA_CHECK(cudaGetLastError());
+
+  float h_out = 0.0F;
+  CUDA_CHECK(cudaMemcpy(&h_out, d_out, sizeof(float), cudaMemcpyDeviceToHost));
+  EXPECT_NEAR(h_out, expected, 1e-2F);
+
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
+}
+
+/// --- 20. Saxpy with a=0 is identity on y --->
+TEST(PerformanceMeasurement, SaxpyZeroAlphaIdentity) {
+  constexpr int N = 256;
+  std::vector<float> h_x(N, 99.0F);
+  std::vector<float> h_y(N);
+  for (int i = 0; i < N; ++i) h_y[static_cast<size_t>(i)] = static_cast<float>(i);
+
+  float *d_x, *d_y;
+  size_t bytes = N * sizeof(float);
+  CUDA_CHECK(cudaMalloc(&d_x, bytes));
+  CUDA_CHECK(cudaMalloc(&d_y, bytes));
+  CUDA_CHECK(cudaMemcpy(d_x, h_x.data(), bytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_y, h_y.data(), bytes, cudaMemcpyHostToDevice));
+
+  saxpy_kernel<<<(N + 255) / 256, 256>>>(0.0F, d_x, d_y, N);
+  CUDA_CHECK(cudaGetLastError());
+
+  std::vector<float> h_result(N);
+  CUDA_CHECK(cudaMemcpy(h_result.data(), d_y, bytes, cudaMemcpyDeviceToHost));
+  for (int i = 0; i < N; ++i) {
+    EXPECT_FLOAT_EQ(h_result[static_cast<size_t>(i)], h_y[static_cast<size_t>(i)])
+        << "y should be unchanged when a=0";
+  }
+
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_y));
+}
+
+/// --- 21. Benchmark bandwidth increases with data size --->
+TEST(PerformanceMeasurement, BandwidthScalesWithSize) {
+  // A large vector add should report higher overall bandwidth than a tiny one
+  // (due to launch overhead dominating at small sizes).
+  constexpr int N_SMALL = 256;
+  constexpr int N_LARGE = 1 << 20;
+
+  float *d_a_s, *d_b_s, *d_c_s;
+  CUDA_CHECK(cudaMalloc(&d_a_s, N_SMALL * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_b_s, N_SMALL * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_c_s, N_SMALL * sizeof(float)));
+  auto r_small = benchmark_kernel(
+      2, 10, [&]() { vector_add_kernel<<<1, 256>>>(d_a_s, d_b_s, d_c_s, N_SMALL); });
+  float bw_small = r_small.bandwidth_gb_s(3UL * N_SMALL * sizeof(float));
+
+  float *d_a_l, *d_b_l, *d_c_l;
+  CUDA_CHECK(cudaMalloc(&d_a_l, N_LARGE * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_b_l, N_LARGE * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_c_l, N_LARGE * sizeof(float)));
+  auto r_large = benchmark_kernel(2, 10, [&]() {
+    vector_add_kernel<<<(N_LARGE + 255) / 256, 256>>>(d_a_l, d_b_l, d_c_l, N_LARGE);
+  });
+  float bw_large = r_large.bandwidth_gb_s(3UL * N_LARGE * sizeof(float));
+
+  EXPECT_GT(bw_large, bw_small) << "Large kernel should achieve higher effective bandwidth";
+
+  CUDA_CHECK(cudaFree(d_a_s));
+  CUDA_CHECK(cudaFree(d_b_s));
+  CUDA_CHECK(cudaFree(d_c_s));
+  CUDA_CHECK(cudaFree(d_a_l));
+  CUDA_CHECK(cudaFree(d_b_l));
+  CUDA_CHECK(cudaFree(d_c_l));
 }

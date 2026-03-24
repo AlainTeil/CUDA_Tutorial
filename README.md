@@ -15,6 +15,8 @@ and a companion unit-test file (powered by Google Test).
 | Clang | 18+ (optional, for host compiler) |
 | Doxygen | 1.9+ (optional, for docs) |
 | clang-format | 18+ (optional, for formatting) |
+| clang-tidy | 18+ (optional, for static analysis) |
+| Python | 3.8+ (optional, for clang-tidy sanitiser script) |
 | Graphviz | any (optional, for Doxygen call graphs) |
 | NVIDIA GPU | Compute capability ≥ 7.5 (Turing+) |
 
@@ -33,14 +35,46 @@ ctest --test-dir build --output-on-failure -j4
 # Format all source files (requires clang-format)
 cmake --build build --target format
 
+# Static analysis (requires clang-tidy + Python 3 + compile_commands.json)
+cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  # once
+cmake --build build --target tidy
+
 # Generate API documentation (requires Doxygen)
 cmake --build build --target docs
 # → open docs/html/index.html
 ```
 
+### Using CMake Presets
+
+The project ships a `CMakePresets.json` with ready-made configurations:
+
+```bash
+cmake --preset release        # Release build (GCC)
+cmake --build --preset release -j$(nproc)
+ctest --preset release
+
+cmake --preset debug          # Debug build (GCC)
+cmake --preset relwithdebinfo # RelWithDebInfo (optimized + debug symbols)
+cmake --preset clang          # Release build (Clang host compiler)
+cmake --preset cudnn          # Release + cuDNN (Lesson 19)
+
+# Build & test any preset with the same pattern:
+cmake --build --preset <name> -j$(nproc)
+ctest --preset <name>
+```
+
+Presets automatically enable `CMAKE_EXPORT_COMPILE_COMMANDS` for
+clang-tidy, and place build artifacts under `build/<preset-name>/`.
+
 ### Building with Clang as host compiler
 
 ```bash
+# Via preset (recommended):
+cmake --preset clang
+cmake --build --preset clang -j$(nproc)
+ctest --preset clang
+
+# Or manually:
 cmake -B build-clang \
   -DCMAKE_C_COMPILER=clang \
   -DCMAKE_CXX_COMPILER=clang++ \
@@ -128,9 +162,14 @@ cmake -B build -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90;100" \
 CUDA_Tutorial/
 ├── CMakeLists.txt          # Root build configuration
 ├── cmake/
-│   └── CompilerWarnings.cmake
+│   ├── CompilerWarnings.cmake
+│   ├── run_clang_tidy.py          # Sanitises nvcc flags for clang-tidy
+│   └── clang_cuda_compat/
+│       └── texture_fetch_functions.h  # Stub for Clang 18 + CUDA 13
 ├── .clang-format           # Google style
+├── .clang-tidy             # Static analysis configuration
 ├── .gitignore
+├── CMakePresets.json        # Named build presets
 ├── Doxyfile                # Doxygen 1.9.8 configuration
 ├── README.md
 └── lessons/
@@ -153,6 +192,75 @@ CUDA_Tutorial/
     ├── 31_self_attention/
     └── 32_transformer/
 ```
+
+## Troubleshooting
+
+<details>
+<summary><strong>CMake cannot find CUDA</strong></summary>
+
+Ensure `nvcc` is on your `PATH`:
+```bash
+export PATH=/usr/local/cuda/bin:$PATH
+nvcc --version
+```
+If you installed the toolkit via the runfile, make sure
+`/usr/local/cuda` is a symlink to the correct version.
+</details>
+
+<details>
+<summary><strong>"no kernel image is available for execution on the device"</strong></summary>
+
+Your GPU's compute capability is not in `CMAKE_CUDA_ARCHITECTURES`.
+Reconfigure with the correct SM version:
+```bash
+cmake -B build -DCMAKE_CUDA_ARCHITECTURES="86" -DCMAKE_BUILD_TYPE=Release
+```
+Run `nvidia-smi` or Lesson 01 to discover your GPU's SM version.
+</details>
+
+<details>
+<summary><strong>Cooperative groups tests fail (Lesson 26)</strong></summary>
+
+`cudaLaunchCooperativeKernel` requires that the grid size does not
+exceed the device's occupancy limit.  If you changed the block size or
+data size, reduce the grid until
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` is satisfied.
+</details>
+
+<details>
+<summary><strong>cuDNN not found (Lesson 19)</strong></summary>
+
+Ensure the cuDNN headers and libraries are under
+`CUDAToolkit_LIBRARY_DIR` (typically `/usr/local/cuda/lib64`):
+```bash
+ls /usr/local/cuda/include/cudnn.h
+ls /usr/local/cuda/lib64/libcudnn.so
+```
+If cuDNN is installed elsewhere, pass `-DCUDNN_PATH=/path/to/cudnn`.
+</details>
+
+<details>
+<summary><strong>Link error: "undefined reference to cublasCreate"</strong></summary>
+
+This usually means `find_package(CUDAToolkit)` failed silently.
+Verify CUDA Toolkit installation and that CMake ≥ 3.20 is in use.
+</details>
+
+<details>
+<summary><strong>clang-format / clang-tidy targets missing</strong></summary>
+
+The `format` and `tidy` targets are only generated when the
+corresponding tool is found at configure time.  The `tidy` target also
+requires Python 3.  Install them with:
+```bash
+sudo apt install clang-format clang-tidy python3   # Ubuntu/Debian
+```
+Then re-run `cmake -B build …`.
+
+The `tidy` target uses `cmake/run_clang_tidy.py` to sanitise the
+nvcc-generated `compile_commands.json` so that Clang's frontend can
+parse it.  This is fully automatic — just run `cmake --build build --target tidy`.
+</details>
 
 ## License
 

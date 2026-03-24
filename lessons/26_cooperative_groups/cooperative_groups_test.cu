@@ -21,7 +21,7 @@ namespace cg = cooperative_groups;
 
 #define CUDA_CHECK(call)                                                    \
   do {                                                                      \
-    cudaError_t err_ = (call);                                              \
+    const cudaError_t err_ = (call);                                        \
     if (err_ != cudaSuccess) {                                              \
       std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                               \

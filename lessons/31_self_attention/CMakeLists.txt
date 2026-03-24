@@ -1,5 +1,5 @@
 
-find_package(CUDAToolkit REQUIRED)
+# CUDAToolkit already found at project root.
 
 add_executable(31_self_attention self_attention.cu)
 target_link_libraries(31_self_attention PRIVATE CUDA::cudart CUDA::cublas)

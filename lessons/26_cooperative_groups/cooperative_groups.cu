@@ -58,7 +58,7 @@ namespace cg = cooperative_groups;
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -331,7 +331,8 @@ int main() {
     CUDA_CHECK(cudaMemset(d_out, 0, sizeof(float)));
 
     // Cooperative launch
-    void* args[] = {&d_in, &d_partial, &d_out, const_cast<int*>(&kN)};
+    void* args[] = {&d_in, &d_partial, &d_out,
+                    const_cast<int*>(&kN)};  // NOLINT(cppcoreguidelines-pro-type-const-cast)
     CUDA_CHECK(cudaLaunchCooperativeKernel(reinterpret_cast<void*>(grid_reduce_kernel),
                                            dim3(grid_size), dim3(kBlockSize), args));
     CUDA_CHECK(cudaDeviceSynchronize());

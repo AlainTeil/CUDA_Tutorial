@@ -61,7 +61,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -287,6 +287,14 @@ __global__ void batchnorm_backward_dx(const float* __restrict__ dy, const float*
   float inv = rsqrtf(var[c] + eps);
   float inv_N = 1.0F / static_cast<float>(N);
 
+  // ---------- derivation of dx for batch normalisation ----------
+  // Forward:  x_hat = (x - mu) / sigma     where sigma = sqrt(var + eps)
+  // Both mu and var are functions of *all* x in the batch, so:
+  //   dL/dx_i = gamma / sigma * [ dy_i
+  //             - (1/N) * sum_j(dy_j)                    ... = dbeta / N
+  //             - (1/N) * x_hat_i * sum_j(dy_j * x_hat_j) ... = x_hat * dgamma / N ]
+  // Rearranging:  dx = gamma * inv * (dy - (1/N)(dbeta + x_hat * dgamma))
+  // where inv = rsqrt(var + eps),  dbeta = sum(dy),  dgamma = sum(dy * x_hat).
   dx[idx] = gamma[c] * inv * (dy[idx] - inv_N * (dbeta[c] + x_hat[idx] * dgamma[c]));
 }
 
@@ -330,7 +338,11 @@ int main() {
   CUDA_CHECK(cudaMemcpy(d_gamma, h_gamma.data(), bytes_C, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_beta, h_beta.data(), bytes_C, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemset(d_running_mean, 0, bytes_C));
-  CUDA_CHECK(cudaMemset(d_running_var, 0, bytes_C));
+  // Running variance must be initialised to 1 (unit variance), NOT 0.
+  // With EMA updates: running = (1-m)*running + m*batch, starting from 0
+  // would bias early inference towards near-zero variance → exploding outputs.
+  std::vector<float> ones_C(kC, 1.0F);
+  CUDA_CHECK(cudaMemcpy(d_running_var, ones_C.data(), bytes_C, cudaMemcpyHostToDevice));
 
   // -- Forward pass --
   int smem = kBlockSize * static_cast<int>(sizeof(float));

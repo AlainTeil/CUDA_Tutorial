@@ -10,6 +10,13 @@ out/
 *.so
 *.dylib
 
+# Python
+__pycache__/
+*.pyc
+
+# CMake user-local presets
+CMakeUserPresets.json
+
 # Editor / IDE
 .vscode/
 .idea/

@@ -30,7 +30,11 @@
  *
  * - Part 1: Forward — single-step GRU cell
  * - Part 2: Forward — unrolled over T time-steps
- * - Part 3: Backward — BPTT through T steps
+ * - Part 3: Backward — full BPTT through T steps.  The gate-level
+ *   backward kernel produces d_xW and d_hU (gradients at the GEMM
+ *   outputs).  Three additional cuBLAS calls per step then accumulate
+ *   the weight gradients (dW, dU), propagate the hidden gradient
+ *   through U, and compute the input gradient dx.
  *
  * See Lesson 28 for embeddings that feed into the GRU, and Lesson 25 for
  * optimizers used to train the weights.
@@ -46,7 +50,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -56,7 +60,7 @@
 
 #define CUBLAS_CHECK(call)                                                          \
   do {                                                                              \
-    cublasStatus_t st_ = (call);                                                    \
+    const cublasStatus_t st_ = (call);                                              \
     if (st_ != CUBLAS_STATUS_SUCCESS) {                                             \
       std::fprintf(stderr, "cuBLAS error at %s:%d — code %d\n", __FILE__, __LINE__, \
                    static_cast<int>(st_));                                          \
@@ -320,49 +324,76 @@ int main() {
   float* d_d_xW;
   float* d_d_hU;
   float* d_dbias;
+  float* d_dW;  // accumulated weight gradient (3H × I)
+  float* d_dU;  // accumulated weight gradient (3H × H)
+  float* d_dx;  // input gradient (T × B × I)
   CUDA_CHECK(cudaMalloc(&d_dh, kB * kH * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dh_prev, kB * kH * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_d_xW, kB * 3 * kH * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_d_hU, kB * 3 * kH * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dbias, 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dW, 3 * kH * kI * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dU, 3 * kH * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dx, kT * kB * kI * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dbias, 0, 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_dW, 0, 3 * kH * kI * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_dU, 0, 3 * kH * kH * sizeof(float)));
 
   // Seed: gradient of loss w.r.t. final hidden state = 1.0
   std::vector<float> ones(kB * kH, 1.0F);
   CUDA_CHECK(cudaMemcpy(d_dh, ones.data(), kB * kH * sizeof(float), cudaMemcpyHostToDevice));
 
   for (int t = kT - 1; t >= 0; --t) {
+    const float* x_t = d_x + t * kB * kI;
     const float* h_prev = d_h + t * kB * kH;
     const float* z_t = d_z + t * kB * kH;
     const float* r_t = d_r + t * kB * kH;
     const float* n_t = d_n + t * kB * kH;
 
     // Re-compute hU for this step (same GEMM as forward)
-    float alpha = 1.0F, beta = 0.0F;
+    float alpha = 1.0F, beta_zero = 0.0F, beta_one = 1.0F;
     CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 3 * kH, kB, kH, &alpha, d_U, kH,
-                             h_prev, kH, &beta, d_hU, 3 * kH));
+                             h_prev, kH, &beta_zero, d_hU, 3 * kH));
 
+    // Gate-level backward: produces d_xW, d_hU, dbias, and partial dh_prev
     int grid = (kB * kH + kBlockSize - 1) / kBlockSize;
     gru_backward_gates_kernel<<<grid, kBlockSize>>>(d_dh, z_t, r_t, n_t, h_prev, d_hU, d_dh_prev,
                                                     d_d_xW, d_d_hU, d_dbias, kB, kH);
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Propagate: dh for next iteration (t-1) includes dh_prev + gradient through U
-    //
-    // NOTE: Pedagogical simplification — a complete BPTT implementation would
-    // add the gradient flowing through the hidden-to-hidden (U) matrix:
-    //     dh_{t-1} += d_gates @ U^T
-    // and would also accumulate weight gradients dW and dU via outer products.
-    // Here we only propagate dh_prev directly and accumulate bias gradients to
-    // keep the lesson focused on the gate-level backward computation.
+    // ---------- weight gradients (outer products) ----------
+    // dW += x_t^T @ d_xW   →  (I × B) @ (B × 3H) = (I × 3H)  [col-major]
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, kI, 3 * kH, kB, &alpha, x_t, kI,
+                             d_d_xW, 3 * kH, &beta_one, d_dW, kI));
+    // dU += h_prev^T @ d_hU  →  (H × B) @ (B × 3H) = (H × 3H)
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, kH, 3 * kH, kB, &alpha, h_prev, kH,
+                             d_d_hU, 3 * kH, &beta_one, d_dU, kH));
+
+    // ---------- hidden gradient through U ----------
+    // dh_prev already holds dh*z from the kernel; add the U-path:
+    //   dh_prev += U @ d_hU  →  (H × 3H) @ (3H × B) = (H × B)
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, kH, kB, 3 * kH, &alpha, d_U, kH,
+                             d_d_hU, 3 * kH, &beta_one, d_dh_prev, kH));
+
+    // ---------- input gradient ----------
+    // dx_t = W @ d_xW  →  (I × 3H) @ (3H × B) = (I × B)
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, kI, kB, 3 * kH, &alpha, d_W, kI,
+                             d_d_xW, 3 * kH, &beta_zero, d_dx + t * kB * kI, kI));
+
+    // Propagate dh_prev → dh for the next (earlier) time-step
     CUDA_CHECK(cudaMemcpy(d_dh, d_dh_prev, kB * kH * sizeof(float), cudaMemcpyDeviceToDevice));
   }
 
-  // Print bias gradient snippet
-  float dbias0 = 0.0F;
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  // Print gradient snippets
+  float dbias0 = 0.0F, dW0 = 0.0F, dU0 = 0.0F;
   CUDA_CHECK(cudaMemcpy(&dbias0, d_dbias, sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&dW0, d_dW, sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&dU0, d_dU, sizeof(float), cudaMemcpyDeviceToHost));
   std::printf("  dbias[0] = %.6f\n", static_cast<double>(dbias0));
+  std::printf("  dW[0]    = %.6f\n", static_cast<double>(dW0));
+  std::printf("  dU[0]    = %.6f\n", static_cast<double>(dU0));
 
   // ---- Cleanup ----
   CUDA_CHECK(cudaFree(d_W));
@@ -380,6 +411,9 @@ int main() {
   CUDA_CHECK(cudaFree(d_d_xW));
   CUDA_CHECK(cudaFree(d_d_hU));
   CUDA_CHECK(cudaFree(d_dbias));
+  CUDA_CHECK(cudaFree(d_dW));
+  CUDA_CHECK(cudaFree(d_dU));
+  CUDA_CHECK(cudaFree(d_dx));
   CUBLAS_CHECK(cublasDestroy(handle));
 
   std::printf("\nDone.\n");

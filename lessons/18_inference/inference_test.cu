@@ -20,7 +20,7 @@
 
 #define CUDA_CHECK(call)                                                    \
   do {                                                                      \
-    cudaError_t err_ = (call);                                              \
+    const cudaError_t err_ = (call);                                        \
     if (err_ != cudaSuccess) {                                              \
       std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                               \
@@ -30,7 +30,7 @@
 
 #define CUDA_ASSERT(call)                                                 \
   do {                                                                    \
-    cudaError_t err_ = (call);                                            \
+    const cudaError_t err_ = (call);                                      \
     if (err_ != cudaSuccess) {                                            \
       std::fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(err_)); \
       std::abort();                                                       \
@@ -457,4 +457,133 @@ TEST(InferenceTest, BatchAccuracy) {
   mlp.free_all();
   loaded.free_all();
   std::remove(path.c_str());
+}
+
+// =============================================================================
+// Test: saved weight file has the exact expected size
+// =============================================================================
+
+TEST(InferenceTest, WeightFileSizeCorrect) {
+  const std::string path = "/tmp/test_weights_size.bin";
+
+  InferenceMLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(77);
+  mlp.save(path);
+
+  // Expected: 3 ints (header) + (4*16 + 16 + 16*3 + 3) floats.
+  size_t expected = 3 * sizeof(int) + (64 + 16 + 48 + 3) * sizeof(float);
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  EXPECT_EQ(static_cast<size_t>(f.tellg()), expected);
+
+  mlp.free_all();
+  std::remove(path.c_str());
+}
+
+// =============================================================================
+// Test: forward logits are finite (no NaN/Inf)
+// =============================================================================
+
+TEST(InferenceTest, LogitsAreFinite) {
+  InferenceMLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(11);
+
+  float* d_x;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+
+  // Test several different inputs including edge cases.
+  std::vector<std::vector<float>> inputs = {
+      {0.0F, 0.0F, 0.0F, 0.0F},      // zeros
+      {1.0F, 1.0F, 1.0F, 1.0F},      // ones
+      {10.0F, -10.0F, 5.0F, -5.0F},  // large magnitudes
+      {1e-6F, 1e-6F, 1e-6F, 1e-6F},  // tiny values
+  };
+
+  for (size_t t = 0; t < inputs.size(); ++t) {
+    CUDA_CHECK(cudaMemcpy(d_x, inputs[t].data(), 4 * sizeof(float), cudaMemcpyHostToDevice));
+    int cls = mlp.predict(d_x);
+    EXPECT_GE(cls, 0);
+    EXPECT_LT(cls, 3);
+
+    std::vector<float> logits(3);
+    CUDA_CHECK(cudaMemcpy(logits.data(), mlp.z2, 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < 3; ++i) {
+      EXPECT_TRUE(std::isfinite(logits[static_cast<size_t>(i)]))
+          << "logit[" << i << "] not finite for input set " << t;
+    }
+  }
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+}
+
+// =============================================================================
+// Test: identical inputs produce identical predictions (determinism)
+// =============================================================================
+
+TEST(InferenceTest, DeterministicPredictions) {
+  const std::string path = "/tmp/test_weights_determ.bin";
+
+  std::vector<std::vector<float>> samples;
+  std::vector<int> labels;
+  generate_data(samples, labels, 20, 42);
+
+  InferenceMLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(123);
+  train_model(mlp, samples, labels, 20, 0.05F);
+  mlp.save(path);
+
+  // Run predict_batch twice and compare.
+  InferenceMLP m{};
+  m.alloc(4, 16, 3);
+  m.load(path);
+
+  std::vector<int> preds1, preds2;
+  m.predict_batch(samples, preds1);
+  m.predict_batch(samples, preds2);
+
+  ASSERT_EQ(preds1.size(), preds2.size());
+  for (size_t i = 0; i < preds1.size(); ++i) {
+    EXPECT_EQ(preds1[i], preds2[i]) << "Non-deterministic prediction at sample " << i;
+  }
+
+  mlp.free_all();
+  m.free_all();
+  std::remove(path.c_str());
+}
+
+// =============================================================================
+// Test: forward_loss returns non-negative loss
+// =============================================================================
+
+TEST(InferenceTest, ForwardLossNonNegative) {
+  InferenceMLP mlp{};
+  mlp.alloc(4, 16, 3);
+  mlp.init_weights(42);
+
+  float* d_x;
+  float* d_target;
+  CUDA_CHECK(cudaMalloc(&d_x, 4 * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_target, 3 * sizeof(float)));
+
+  std::vector<std::vector<float>> samples;
+  std::vector<int> labels;
+  generate_data(samples, labels, 5, 88);
+
+  for (int s = 0; s < static_cast<int>(samples.size()); ++s) {
+    CUDA_CHECK(cudaMemcpy(d_x, samples[static_cast<size_t>(s)].data(), 4 * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    std::vector<float> one_hot(3, 0.0F);
+    one_hot[static_cast<size_t>(labels[static_cast<size_t>(s)])] = 1.0F;
+    CUDA_CHECK(cudaMemcpy(d_target, one_hot.data(), 3 * sizeof(float), cudaMemcpyHostToDevice));
+    float loss = mlp.forward_loss(d_x, d_target);
+    EXPECT_GE(loss, 0.0F) << "Loss must be non-negative for sample " << s;
+    EXPECT_TRUE(std::isfinite(loss)) << "Loss must be finite for sample " << s;
+  }
+
+  mlp.free_all();
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_target));
 }

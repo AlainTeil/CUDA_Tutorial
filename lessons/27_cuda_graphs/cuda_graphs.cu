@@ -44,7 +44,7 @@
 
 #define CUDA_CHECK(call)                                                     \
   do {                                                                       \
-    cudaError_t err_ = (call);                                               \
+    const cudaError_t err_ = (call);                                         \
     if (err_ != cudaSuccess) {                                               \
       std::fprintf(stderr, "CUDA error at %s:%d — %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                                \
@@ -198,7 +198,7 @@ static void demo_explicit_graph(float* d_buf, int n) {
   // Node 1: fill_kernel
   cudaKernelNodeParams fill_params{};
   float fill_val = 2.0F;
-  void* fill_args[] = {&d_buf, const_cast<int*>(&n), &fill_val};
+  void* fill_args[] = {&d_buf, &n, &fill_val};
   fill_params.func = reinterpret_cast<void*>(fill_kernel);
   fill_params.gridDim = dim3(grid);
   fill_params.blockDim = dim3(kBlockSize);
@@ -212,7 +212,7 @@ static void demo_explicit_graph(float* d_buf, int n) {
   // Node 2: scale_kernel  (depends on fill)
   cudaKernelNodeParams scale_params{};
   float scale_val = 0.5F;
-  void* scale_args[] = {&d_buf, &d_buf, const_cast<int*>(&n), &scale_val};
+  void* scale_args[] = {&d_buf, &d_buf, &n, &scale_val};
   scale_params.func = reinterpret_cast<void*>(scale_kernel);
   scale_params.gridDim = dim3(grid);
   scale_params.blockDim = dim3(kBlockSize);
@@ -226,7 +226,7 @@ static void demo_explicit_graph(float* d_buf, int n) {
   // Node 3: add_bias_kernel  (depends on scale)
   cudaKernelNodeParams bias_params{};
   float bias_val = -0.3F;
-  void* bias_args[] = {&d_buf, const_cast<int*>(&n), &bias_val};
+  void* bias_args[] = {&d_buf, &n, &bias_val};
   bias_params.func = reinterpret_cast<void*>(add_bias_kernel);
   bias_params.gridDim = dim3(grid);
   bias_params.blockDim = dim3(kBlockSize);
@@ -239,7 +239,7 @@ static void demo_explicit_graph(float* d_buf, int n) {
 
   // Node 4: relu_kernel  (depends on bias)
   cudaKernelNodeParams relu_params{};
-  void* relu_args[] = {&d_buf, const_cast<int*>(&n)};
+  void* relu_args[] = {&d_buf, &n};
   relu_params.func = reinterpret_cast<void*>(relu_kernel);
   relu_params.gridDim = dim3(grid);
   relu_params.blockDim = dim3(kBlockSize);
@@ -253,7 +253,7 @@ static void demo_explicit_graph(float* d_buf, int n) {
   // Instantiate and launch
   cudaGraphExec_t instance;
   CUDA_CHECK(cudaGraphInstantiate(&instance, graph));
-  CUDA_CHECK(cudaGraphLaunch(instance, 0));
+  CUDA_CHECK(cudaGraphLaunch(instance, nullptr));
   CUDA_CHECK(cudaDeviceSynchronize());
 
   float first = 0.0F;

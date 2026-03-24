@@ -20,7 +20,7 @@
 
 #define CUDA_CHECK(call)                                                    \
   do {                                                                      \
-    cudaError_t err_ = (call);                                              \
+    const cudaError_t err_ = (call);                                        \
     if (err_ != cudaSuccess) {                                              \
       std::fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, \
                    cudaGetErrorString(err_));                               \
@@ -30,7 +30,7 @@
 
 #define CUDA_ASSERT(call)                                                 \
   do {                                                                    \
-    cudaError_t err_ = (call);                                            \
+    const cudaError_t err_ = (call);                                      \
     if (err_ != cudaSuccess) {                                            \
       std::fprintf(stderr, "CUDA error: %s\n", cudaGetErrorString(err_)); \
       std::abort();                                                       \
@@ -145,9 +145,9 @@ __global__ void batchnorm_backward_dx(const float* __restrict__ dy, const float*
 // ---- Helper: run full BN forward and return y on host ----------------------
 
 struct BNBuffers {
-  float *d_x, *d_mean, *d_var, *d_gamma, *d_beta, *d_x_hat, *d_y;
-  int N, C;
-  float eps;
+  float *d_x{}, *d_mean{}, *d_var{}, *d_gamma{}, *d_beta{}, *d_x_hat{}, *d_y{};
+  int N{}, C{};
+  float eps{};
 
   void alloc(int n, int c, float epsilon = 1e-5F) {
     N = n;

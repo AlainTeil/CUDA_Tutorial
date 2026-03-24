@@ -1,5 +1,5 @@
 
-find_package(CUDAToolkit REQUIRED)
+# CUDAToolkit already found at project root.
 
 add_executable(20_minibatch_training minibatch_training.cu)
 target_link_libraries(20_minibatch_training PRIVATE CUDA::cudart CUDA::cublas)
