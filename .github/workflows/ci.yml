@@ -17,6 +17,10 @@ jobs:
   # --------------------------------------------------------------------------
   build-and-test:
     name: Build & Test (CUDA)
+    # Only runs when a self-hosted GPU runner is registered AND the repo
+    # variable HAS_GPU_RUNNER is set to "true" (Settings → Variables → Actions).
+    # Otherwise this job is skipped so it doesn't queue forever.
+    if: vars.HAS_GPU_RUNNER == 'true'
     runs-on: [self-hosted, linux, gpu]   # Adjust label to your runner fleet
     timeout-minutes: 30
 
