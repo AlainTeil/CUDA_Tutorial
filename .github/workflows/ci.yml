@@ -115,7 +115,11 @@ jobs:
           cuda: "12.6.0"
           method: network
           sub-packages: '["nvcc", "cudart-dev"]'
-          non-cuda-sub-packages: '["libcublas-dev"]'
+          # clang-tidy uses clang's CUDA front-end, whose
+          # __clang_cuda_runtime_wrapper.h unconditionally pulls in curand
+          # headers — so libcurand-dev is required even though our code
+          # never calls curand directly.
+          non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
 
       - name: Configure (for compile_commands.json)
         run: |
