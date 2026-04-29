@@ -160,6 +160,25 @@ __global__ void col_sum(const float* __restrict__ in, float* __restrict__ out, i
   }
 }
 
+/**
+ * @brief Element-wise scalar multiply.  Used both for averaging
+ *        (s = 1/B) and for FP16 loss scaling (s = loss_scale or 1/loss_scale).
+ *
+ * **Loss-scaling rationale.**  FP16 has a representable range of
+ * roughly [6.1e-5, 6.5e4].  Network gradients during training are often
+ * on the order of 1e-7 to 1e-3 — i.e. comfortably inside the FP16
+ * subnormal/underflow region.  Multiplying the loss (and therefore the
+ * full backward graph) by a large @p s pushes those values up into the
+ * normal FP16 range so they are not flushed to zero.  After the backward
+ * pass we divide by the same factor in FP32 to recover the true gradient.
+ *
+ * Choosing @p s is a trade-off: too small → gradient underflow; too
+ * large → gradient overflow to inf.  Production training therefore uses
+ * *dynamic loss scaling* (e.g. PyTorch's @c GradScaler) which doubles
+ * @p s every N successful steps and halves it whenever a non-finite
+ * gradient is detected.  See the @c LossScalingDetectsOverflow test
+ * below for the overflow-detection pattern.
+ */
 __global__ void scale_kernel(float* __restrict__ data, float s, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) data[i] *= s;
@@ -864,4 +883,67 @@ TEST(MixedPrecisionTest, FP16Saturation) {
   CUDA_ASSERT(cudaFree(d_fp32));
   CUDA_ASSERT(cudaFree(d_fp16));
   CUDA_ASSERT(cudaFree(d_out));
+}
+
+// ---------------------------------------------------------------------------
+// Loss-scaling overflow detection
+//
+// The standard mixed-precision recipe is:
+//   1. Multiply loss by S; backprop in FP16 → gradients are also ×S.
+//   2. Cast FP16 grads back to FP32, divide by S.
+//   3. **If any FP32 grad is inf/nan, skip the optimizer step** and halve S.
+//
+// This test exercises step 3: it picks a value that is fine in FP32 but
+// overflows once multiplied by a too-aggressive loss scale, and shows
+// that the standard inf/nan check correctly flags the step as bad.
+// ---------------------------------------------------------------------------
+TEST(MixedPrecisionTest, LossScalingDetectsOverflow) {
+  constexpr int N = 8;
+  constexpr float kSafeScale = 1024.0F;
+  constexpr float kHugeScale = 1.0e6F;  // big enough to push 0.1 past FP16 max
+  std::vector<float> h_in(N, 0.1F);
+  // mark one element large so that even the safe scale stays in-range, but
+  // the huge scale overflows.  0.1 * 1e6 = 1e5 > 65504 → inf.
+
+  float* d_fp32;
+  __half* d_fp16;
+  float* d_back;
+  CUDA_ASSERT(cudaMalloc(&d_fp32, N * sizeof(float)));
+  CUDA_ASSERT(cudaMalloc(&d_fp16, N * sizeof(__half)));
+  CUDA_ASSERT(cudaMalloc(&d_back, N * sizeof(float)));
+
+  // ---- Safe scale: round-trip preserves finiteness ----
+  CUDA_ASSERT(cudaMemcpy(d_fp32, h_in.data(), N * sizeof(float), cudaMemcpyHostToDevice));
+  int blk = 128;
+  scale_kernel<<<(N + blk - 1) / blk, blk>>>(d_fp32, kSafeScale, N);
+  fp32_to_fp16(d_fp32, d_fp16, N);
+  fp16_to_fp32(d_fp16, d_back, N);
+  scale_kernel<<<(N + blk - 1) / blk, blk>>>(d_back, 1.0F / kSafeScale, N);
+  CUDA_ASSERT(cudaDeviceSynchronize());
+
+  std::vector<float> safe_out(N);
+  CUDA_ASSERT(cudaMemcpy(safe_out.data(), d_back, N * sizeof(float), cudaMemcpyDeviceToHost));
+  bool safe_all_finite = true;
+  for (float v : safe_out) safe_all_finite &= std::isfinite(v);
+  EXPECT_TRUE(safe_all_finite) << "Safe scale should not overflow FP16";
+  for (float v : safe_out) EXPECT_NEAR(v, 0.1F, 1e-3F);
+
+  // ---- Huge scale: must overflow to inf, signalling a bad step ----
+  CUDA_ASSERT(cudaMemcpy(d_fp32, h_in.data(), N * sizeof(float), cudaMemcpyHostToDevice));
+  scale_kernel<<<(N + blk - 1) / blk, blk>>>(d_fp32, kHugeScale, N);
+  fp32_to_fp16(d_fp32, d_fp16, N);
+  fp16_to_fp32(d_fp16, d_back, N);
+  scale_kernel<<<(N + blk - 1) / blk, blk>>>(d_back, 1.0F / kHugeScale, N);
+  CUDA_ASSERT(cudaDeviceSynchronize());
+
+  std::vector<float> huge_out(N);
+  CUDA_ASSERT(cudaMemcpy(huge_out.data(), d_back, N * sizeof(float), cudaMemcpyDeviceToHost));
+  bool any_non_finite = false;
+  for (float v : huge_out) any_non_finite |= !std::isfinite(v);
+  EXPECT_TRUE(any_non_finite)
+      << "Aggressive loss scale must overflow FP16 — caller is expected to skip the step";
+
+  CUDA_ASSERT(cudaFree(d_fp32));
+  CUDA_ASSERT(cudaFree(d_fp16));
+  CUDA_ASSERT(cudaFree(d_back));
 }

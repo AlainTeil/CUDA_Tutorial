@@ -31,7 +31,7 @@ gradients for weights (dW, dU), biases, and inputs.
 | File | Purpose |
 |------|---------|
 | `gru.cu` | GRU cell, sequence unrolling, full BPTT |
-| `gru_test.cu` | Gate correctness, hidden state evolution, bias gradient tests |
+| `gru_test.cu` | Gate correctness, hidden-state evolution, bias-gradient sanity, BPTT weight (dW, dU, dbias) and input (dx) gradients verified against central finite differences |
 
 ## Build & Run
 
@@ -51,3 +51,5 @@ ctest --test-dir build -R 30_gru
 1. How GRU's two gates (update, reset) control information flow.
 2. How concatenated GEMMs reduce the number of cuBLAS calls.
 3. The basic structure of BPTT and gate-level gradient computation.
+4. How to validate a hand-written BPTT against central finite differences
+   for both weights and inputs.

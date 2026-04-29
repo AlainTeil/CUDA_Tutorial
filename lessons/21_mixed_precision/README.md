@@ -18,6 +18,7 @@ deep learning training.
 | TF32 mode | Transparent on Ampere+; same code, ~2× faster via `CUBLAS_TF32_TENSOR_OP_MATH` |
 | FP16 mode | Explicit half-precision via `__half`; requires loss scaling |
 | Loss scaling | Scale loss to prevent gradient underflow in FP16 range |
+| Overflow detection | Check unscaled gradients for inf/nan and skip the optimizer step (dynamic-scaling pattern) |
 | Master weights | FP32 copy updated with unscaled FP32 gradients |
 
 ## Files
@@ -44,4 +45,7 @@ ctest --test-dir build -R 21_mixed_precision
 
 1. How FP16 and TF32 exploit Tensor Cores for faster GEMM.
 2. Why loss scaling prevents gradient underflow in half precision.
-3. The dual-storage pattern: FP16 for compute, FP32 for accumulation.
+3. How an over-aggressive loss scale overflows FP16 to inf, and how the
+   `LossScalingDetectsOverflow` test mirrors the standard skip-and-halve
+   recipe used by production frameworks.
+4. The dual-storage pattern: FP16 for compute, FP32 for accumulation.

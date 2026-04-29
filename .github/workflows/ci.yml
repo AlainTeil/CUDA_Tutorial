@@ -52,3 +52,144 @@ jobs:
         run: |
           find lessons -name '*.cu' -o -name '*.cpp' -o -name '*.h' -o -name '*.cuh' \
             | xargs clang-format --dry-run --Werror
+
+  # --------------------------------------------------------------------------
+  # Build-only job on a GitHub-hosted CPU runner. Catches compile errors and
+  # template/kernel-launch syntax bugs without needing a GPU. Tests are built
+  # but not executed (kernels would fail at launch without a device).
+  build-cpu:
+    name: Build (no GPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.6.0"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "cublas-dev"]'
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" \
+            -DCUDA_TUTORIAL_BUILD_DOCS=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Upload compile_commands.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-commands
+          path: build/compile_commands.json
+
+  # --------------------------------------------------------------------------
+  # Static analysis via the project's run_clang_tidy.py wrapper. Depends on
+  # the build-cpu job so we know the configuration succeeded.
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    needs: build-cpu
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-tidy + Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy python3 cmake ninja-build
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.6.0"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "cublas-dev"]'
+
+      - name: Configure (for compile_commands.json)
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="86" \
+            -DCUDA_TUTORIAL_BUILD_DOCS=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy on a representative subset
+        # Full-tree clang-tidy is slow on a free runner; sample a handful of
+        # files spanning host code, kernels, cuBLAS, and reductions.
+        run: |
+          python3 cmake/run_clang_tidy.py \
+            build \
+            clang-tidy \
+            lessons/01_device_query/device_query.cu \
+            lessons/08_reduction/reduction.cu \
+            lessons/11_matmul/matmul.cu \
+            lessons/19_cublas_cudnn/cublas_cudnn.cu \
+            lessons/29_residual_layernorm/residual_layernorm.cu
+
+  # --------------------------------------------------------------------------
+  # cuDNN-enabled CPU build: parity with the local `cudnn` preset. Verifies
+  # that Lesson 19's optional cuDNN code path still compiles whenever someone
+  # touches the cuBLAS/cuDNN helpers. Tests are built but not executed (no GPU
+  # on hosted runners).
+  build-cudnn:
+    name: Build (cuDNN, no GPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.6.0"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "cublas-dev"]'
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build wget
+
+      - name: Install cuDNN (libcudnn9 for CUDA 12)
+        # cuDNN is distributed via NVIDIA's apt repository. We add the CUDA
+        # keyring (matching the Jimver action's CUDA 12.6 install) and pull
+        # the dev package containing headers + libcudnn.so.
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y libcudnn9-dev-cuda-12
+
+      - name: Configure with cuDNN
+        # Point the project's find_library/find_path at the system locations
+        # used by libcudnn9-dev-cuda-12 (headers in /usr/include, libs in
+        # /usr/lib/x86_64-linux-gnu).
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" \
+            -DCUDA_TUTORIAL_USE_CUDNN=ON \
+            -DCUDA_TUTORIAL_BUILD_DOCS=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCUDNN_LIBRARY=/usr/lib/x86_64-linux-gnu/libcudnn.so \
+            -DCUDNN_INCLUDE=/usr/include
+
+      - name: Verify cuDNN was actually picked up
+        # Fail loudly if the optional cuDNN path silently went disabled —
+        # otherwise this job would degrade to a duplicate of `build-cpu`.
+        run: |
+          grep -q 'HAS_CUDNN=1' build/compile_commands.json \
+            || (echo "ERROR: HAS_CUDNN=1 not in compile_commands.json — cuDNN not enabled" && exit 1)
+
+      - name: Build
+        run: cmake --build build -j$(nproc)

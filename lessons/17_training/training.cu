@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #define CUDA_CHECK(call)                                                     \
@@ -255,6 +256,20 @@ struct MLP {
 
   /** @brief Allocate all device buffers for weights, activations, and gradients. */
   void alloc(int in, int hid, int out) {
+    // The kernels in this lesson are intentionally simple: one block of
+    // `hid_dim` (or `out_dim`, or `hid_dim*out_dim`) threads per launch.
+    // CUDA caps a block at 1024 threads, so we must reject larger
+    // configurations explicitly — otherwise the launch silently fails and
+    // the loss stays at NaN with no obvious cause.  Lesson 20 generalises
+    // these kernels to multi-block grids.
+    constexpr int kMaxBlockThreads = 1024;
+    if (hid > kMaxBlockThreads || out > kMaxBlockThreads || hid * out > kMaxBlockThreads ||
+        in * hid > kMaxBlockThreads) {
+      throw std::runtime_error(
+          "MLP::alloc: hid_dim, out_dim, hid_dim*out_dim and in_dim*hid_dim "
+          "must each be <= 1024 in this lesson (single-block kernels). "
+          "See Lesson 20 for a multi-block mini-batch implementation.");
+    }
     in_dim = in;
     hid_dim = hid;
     out_dim = out;
@@ -459,7 +474,11 @@ void generate_data(std::vector<std::vector<float>>& samples, std::vector<int>& l
 
 /// Demonstrates the complete training cycle: data generation → weight init
 /// → (forward → backward → SGD update) × epochs → evaluation.
-int main() {
+///
+/// `MLP::alloc` is the only operation in this lesson that throws (on cudaMalloc
+/// failure — see its body).  Wrap the body in a try/catch so `main` itself is
+/// noexcept, satisfying clang-tidy's `bugprone-exception-escape`.
+int main() try {
   constexpr int N_PER_CLASS = 50;
   constexpr int EPOCHS = 50;
   constexpr float LR = 0.05F;
@@ -516,4 +535,7 @@ int main() {
   CUDA_CHECK(cudaFree(d_x));
   CUDA_CHECK(cudaFree(d_target));
   return EXIT_SUCCESS;
+} catch (const std::exception& e) {
+  std::fprintf(stderr, "Fatal: %s\n", e.what());
+  return EXIT_FAILURE;
 }

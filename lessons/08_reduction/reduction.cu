@@ -137,6 +137,11 @@ __device__ float warp_reduce_sum(float val) {
  * @param out  Per-block partial sums (device pointer, length gridDim.x).
  * @param n    Total number of elements.
  */
+// Number of warps per block; rounded up so the formula stays correct if a
+// future kBlockSize is not a multiple of warpSize (32).  For the default
+// kBlockSize=256 this is exactly 8.
+constexpr int kWarpsPerBlock = (kBlockSize + 31) / 32;
+
 __global__ void reduce_warp_shuffle(const float* in, float* out, int n) {
   int gid = blockIdx.x * blockDim.x + threadIdx.x;
   float val = (gid < n) ? in[gid] : 0.0F;
@@ -145,7 +150,7 @@ __global__ void reduce_warp_shuffle(const float* in, float* out, int n) {
   val = warp_reduce_sum(val);
 
   // First thread in each warp writes to shared memory
-  __shared__ float warp_sums[kBlockSize / 32];
+  __shared__ float warp_sums[kWarpsPerBlock];
   int lane = threadIdx.x % 32;
   int warp_id = threadIdx.x / 32;
 

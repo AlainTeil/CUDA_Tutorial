@@ -617,3 +617,144 @@ TEST_F(GRUTest, BPTTWeightGradsMatchFiniteDiff) {
   CUDA_CHECK(cudaFree(d_dW));
   CUDA_CHECK(cudaFree(d_dU));
 }
+
+// ------------------------------------------------------------------
+// Full BPTT: input gradients (dx) match finite differences
+// ------------------------------------------------------------------
+//
+// Complements BPTTWeightGradsMatchFiniteDiff by probing the gradient that
+// flows back to the inputs (dx_t = W @ d_xW), which is the path used when
+// chaining a GRU after an embedding / preceding layer.
+TEST_F(GRUTest, BPTTInputGradMatchesFiniteDiff) {
+  constexpr int kT = 3;
+  constexpr float kEps = 5e-3F;
+  constexpr float kTol = 5e-2F;
+  constexpr float kAbsFloor = 1e-3F;
+
+  // ---- Allocate ----
+  float *d_W, *d_U, *d_bias, *d_x, *d_h;
+  float *d_xW, *d_hU, *d_z, *d_r, *d_n;
+  CUDA_CHECK(cudaMalloc(&d_W, 3 * kH * kI * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_U, 3 * kH * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_bias, 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_x, kT * kB * kI * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_h, (kT + 1) * kB * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_xW, kB * 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_hU, kB * 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_z, kT * kB * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_r, kT * kB * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_n, kT * kB * kH * sizeof(float)));
+
+  std::vector<float> h_W(3 * kH * kI), h_U(3 * kH * kH), h_bias(3 * kH);
+  std::vector<float> h_x(kT * kB * kI);
+  for (int i = 0; i < static_cast<int>(h_W.size()); ++i)
+    h_W[i] = static_cast<float>((i % 13) - 6) * 0.08F;
+  for (int i = 0; i < static_cast<int>(h_U.size()); ++i)
+    h_U[i] = static_cast<float>((i % 11) - 5) * 0.06F;
+  for (int i = 0; i < 3 * kH; ++i) h_bias[i] = static_cast<float>((i % 7) - 3) * 0.05F;
+  for (int i = 0; i < static_cast<int>(h_x.size()); ++i)
+    h_x[i] = static_cast<float>((i % 9) - 4) * 0.1F;
+
+  CUDA_CHECK(cudaMemcpy(d_W, h_W.data(), 3 * kH * kI * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_U, h_U.data(), 3 * kH * kH * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_bias, h_bias.data(), 3 * kH * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_x, h_x.data(), kT * kB * kI * sizeof(float), cudaMemcpyHostToDevice));
+
+  // ---- Analytical: full BPTT including dx ----
+  run_forward_and_loss(handle_, d_W, d_U, d_bias, d_x, d_h, d_xW, d_hU, d_z, d_r, d_n, kB, kI, kH,
+                       kT);
+
+  float *d_dh, *d_dh_prev, *d_dxW, *d_dhU, *d_dbias, *d_dW, *d_dU, *d_dx;
+  CUDA_CHECK(cudaMalloc(&d_dh, kB * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dh_prev, kB * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dxW, kB * 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dhU, kB * 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dbias, 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dW, 3 * kH * kI * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dU, 3 * kH * kH * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dx, kT * kB * kI * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_dbias, 0, 3 * kH * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_dW, 0, 3 * kH * kI * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_dU, 0, 3 * kH * kH * sizeof(float)));
+
+  std::vector<float> ones(kB * kH, 1.0F);
+  CUDA_CHECK(cudaMemcpy(d_dh, ones.data(), kB * kH * sizeof(float), cudaMemcpyHostToDevice));
+
+  float alpha_blas = 1.0F, beta0 = 0.0F, beta1 = 1.0F;
+  for (int t = kT - 1; t >= 0; --t) {
+    const float* x_t = d_x + t * kB * kI;
+    const float* h_prev = d_h + t * kB * kH;
+
+    CUBLAS_CHECK(cublasSgemm(handle_, CUBLAS_OP_T, CUBLAS_OP_N, 3 * kH, kB, kH, &alpha_blas, d_U,
+                             kH, h_prev, kH, &beta0, d_hU, 3 * kH));
+    int grid = (kB * kH + kBlockSize - 1) / kBlockSize;
+    gru_backward_gates_kernel<<<grid, kBlockSize>>>(d_dh, d_z + t * kB * kH, d_r + t * kB * kH,
+                                                    d_n + t * kB * kH, h_prev, d_hU, d_dh_prev,
+                                                    d_dxW, d_dhU, d_dbias, kB, kH);
+    CUDA_CHECK(cudaGetLastError());
+
+    CUBLAS_CHECK(cublasSgemm(handle_, CUBLAS_OP_N, CUBLAS_OP_T, kI, 3 * kH, kB, &alpha_blas, x_t,
+                             kI, d_dxW, 3 * kH, &beta1, d_dW, kI));
+    CUBLAS_CHECK(cublasSgemm(handle_, CUBLAS_OP_N, CUBLAS_OP_T, kH, 3 * kH, kB, &alpha_blas, h_prev,
+                             kH, d_dhU, 3 * kH, &beta1, d_dU, kH));
+    CUBLAS_CHECK(cublasSgemm(handle_, CUBLAS_OP_N, CUBLAS_OP_N, kH, kB, 3 * kH, &alpha_blas, d_U,
+                             kH, d_dhU, 3 * kH, &beta1, d_dh_prev, kH));
+
+    // dx_t = W @ d_xW   →  (I × 3H) @ (3H × B) = (I × B)
+    CUBLAS_CHECK(cublasSgemm(handle_, CUBLAS_OP_N, CUBLAS_OP_N, kI, kB, 3 * kH, &alpha_blas, d_W,
+                             kI, d_dxW, 3 * kH, &beta0, d_dx + t * kB * kI, kI));
+
+    CUDA_CHECK(cudaMemcpy(d_dh, d_dh_prev, kB * kH * sizeof(float), cudaMemcpyDeviceToDevice));
+  }
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float> ana_dx(kT * kB * kI);
+  CUDA_CHECK(cudaMemcpy(ana_dx.data(), d_dx, kT * kB * kI * sizeof(float), cudaMemcpyDeviceToHost));
+
+  // ---- Numerical: probe a subset of input elements across all time-steps ----
+  // Strided sampling so we cover early, middle, and late steps.
+  const int total_x = kT * kB * kI;
+  const int kCheck = 18;
+  const int stride = total_x / kCheck;
+  for (int k = 0; k < kCheck; ++k) {
+    int idx = k * stride;
+    float orig = h_x[idx];
+
+    h_x[idx] = orig + kEps;
+    CUDA_CHECK(cudaMemcpy(d_x, h_x.data(), total_x * sizeof(float), cudaMemcpyHostToDevice));
+    float loss_plus = run_forward_and_loss(handle_, d_W, d_U, d_bias, d_x, d_h, d_xW, d_hU, d_z,
+                                           d_r, d_n, kB, kI, kH, kT);
+
+    h_x[idx] = orig - kEps;
+    CUDA_CHECK(cudaMemcpy(d_x, h_x.data(), total_x * sizeof(float), cudaMemcpyHostToDevice));
+    float loss_minus = run_forward_and_loss(handle_, d_W, d_U, d_bias, d_x, d_h, d_xW, d_hU, d_z,
+                                            d_r, d_n, kB, kI, kH, kT);
+
+    h_x[idx] = orig;
+    float num_grad = (loss_plus - loss_minus) / (2.0F * kEps);
+    float ana_grad = ana_dx[idx];
+    float denom = std::max({std::abs(num_grad), std::abs(ana_grad), kAbsFloor});
+    float rel_err = std::abs(num_grad - ana_grad) / denom;
+    EXPECT_LT(rel_err, kTol) << "dx[" << idx << "] analytical=" << ana_grad
+                             << " numerical=" << num_grad;
+  }
+
+  CUDA_CHECK(cudaFree(d_W));
+  CUDA_CHECK(cudaFree(d_U));
+  CUDA_CHECK(cudaFree(d_bias));
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_h));
+  CUDA_CHECK(cudaFree(d_xW));
+  CUDA_CHECK(cudaFree(d_hU));
+  CUDA_CHECK(cudaFree(d_z));
+  CUDA_CHECK(cudaFree(d_r));
+  CUDA_CHECK(cudaFree(d_n));
+  CUDA_CHECK(cudaFree(d_dh));
+  CUDA_CHECK(cudaFree(d_dh_prev));
+  CUDA_CHECK(cudaFree(d_dxW));
+  CUDA_CHECK(cudaFree(d_dhU));
+  CUDA_CHECK(cudaFree(d_dbias));
+  CUDA_CHECK(cudaFree(d_dW));
+  CUDA_CHECK(cudaFree(d_dU));
+  CUDA_CHECK(cudaFree(d_dx));
+}

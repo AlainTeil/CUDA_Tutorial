@@ -464,3 +464,122 @@ TEST_F(ResidualLayerNormTest, FusedMatchesSeparate) {
   CUDA_CHECK(cudaFree(d_rs));
   CUDA_CHECK(cudaFree(d_tmp));
 }
+
+// ------------------------------------------------------------------
+// LayerNorm backward: finite-difference checks for dgamma and dbeta
+// ------------------------------------------------------------------
+
+TEST_F(ResidualLayerNormTest, LayerNormGammaBetaGradFiniteDiff) {
+  constexpr int kSmallN = 4;
+  constexpr int kSmallD = 16;
+  constexpr float kH = 1e-3F;
+
+  std::vector<float> h_x(kSmallN * kSmallD);
+  for (int i = 0; i < kSmallN * kSmallD; ++i) h_x[i] = static_cast<float>(i) * 0.1F - 0.5F;
+  std::vector<float> h_gamma(kSmallD), h_beta(kSmallD);
+  for (int d = 0; d < kSmallD; ++d) {
+    h_gamma[d] = 1.0F + 0.05F * static_cast<float>(d);
+    h_beta[d] = 0.1F * static_cast<float>(d) - 0.5F;
+  }
+  std::vector<float> h_dy(kSmallN * kSmallD, 1.0F);
+
+  auto ln_fwd = [&](const std::vector<float>& g_in, const std::vector<float>& b_in) {
+    float *dv_x, *dv_y, *dv_g, *dv_b, *dv_m, *dv_r;
+    CUDA_CHECK(cudaMalloc(&dv_x, kSmallN * kSmallD * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dv_y, kSmallN * kSmallD * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dv_g, kSmallD * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dv_b, kSmallD * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dv_m, kSmallN * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dv_r, kSmallN * sizeof(float)));
+    CUDA_CHECK(
+        cudaMemcpy(dv_x, h_x.data(), kSmallN * kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dv_g, g_in.data(), kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dv_b, b_in.data(), kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+    layernorm_forward_kernel<<<kSmallN, kSmallD, kSmallD * sizeof(float)>>>(
+        dv_x, dv_y, dv_g, dv_b, dv_m, dv_r, kSmallN, kSmallD, kEps);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> out(kSmallN * kSmallD);
+    CUDA_CHECK(
+        cudaMemcpy(out.data(), dv_y, kSmallN * kSmallD * sizeof(float), cudaMemcpyDeviceToHost));
+    cudaFree(dv_x);
+    cudaFree(dv_y);
+    cudaFree(dv_g);
+    cudaFree(dv_b);
+    cudaFree(dv_m);
+    cudaFree(dv_r);
+    return out;
+  };
+
+  // Analytic dgamma, dbeta
+  float *d_x, *d_g, *d_b, *d_m, *d_r, *d_y, *d_dy, *d_dx, *d_dg, *d_db;
+  CUDA_CHECK(cudaMalloc(&d_x, kSmallN * kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_g, kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_b, kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_m, kSmallN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_r, kSmallN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_y, kSmallN * kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dy, kSmallN * kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dx, kSmallN * kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dg, kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_db, kSmallD * sizeof(float)));
+
+  CUDA_CHECK(
+      cudaMemcpy(d_x, h_x.data(), kSmallN * kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_g, h_gamma.data(), kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, h_beta.data(), kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(
+      cudaMemcpy(d_dy, h_dy.data(), kSmallN * kSmallD * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_dg, 0, kSmallD * sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_db, 0, kSmallD * sizeof(float)));
+
+  layernorm_forward_kernel<<<kSmallN, kSmallD, kSmallD * sizeof(float)>>>(
+      d_x, d_y, d_g, d_b, d_m, d_r, kSmallN, kSmallD, kEps);
+  CUDA_CHECK(cudaGetLastError());
+  layernorm_backward_kernel<<<kSmallN, kSmallD, 2 * kSmallD * sizeof(float)>>>(
+      d_dy, d_x, d_g, d_m, d_r, d_dx, d_dg, d_db, kSmallN, kSmallD);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float> h_dg(kSmallD), h_db(kSmallD);
+  CUDA_CHECK(cudaMemcpy(h_dg.data(), d_dg, kSmallD * sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_db.data(), d_db, kSmallD * sizeof(float), cudaMemcpyDeviceToHost));
+
+  // Numerical gradients via central differences over loss = sum(y).
+  for (int d = 0; d < kSmallD; ++d) {
+    auto gp = h_gamma;
+    auto gm = h_gamma;
+    gp[d] += kH;
+    gm[d] -= kH;
+    auto yp = ln_fwd(gp, h_beta);
+    auto ym = ln_fwd(gm, h_beta);
+    double num_g = 0.0;
+    for (size_t i = 0; i < yp.size(); ++i) num_g += static_cast<double>(yp[i] - ym[i]) / (2.0 * kH);
+    EXPECT_NEAR(h_dg[d], num_g, 5e-2F) << "dgamma mismatch at d=" << d;
+
+    auto bp = h_beta;
+    auto bm = h_beta;
+    bp[d] += kH;
+    bm[d] -= kH;
+    auto yp2 = ln_fwd(h_gamma, bp);
+    auto ym2 = ln_fwd(h_gamma, bm);
+    double num_b = 0.0;
+    for (size_t i = 0; i < yp2.size(); ++i)
+      num_b += static_cast<double>(yp2[i] - ym2[i]) / (2.0 * kH);
+    EXPECT_NEAR(h_db[d], num_b, 5e-2F) << "dbeta mismatch at d=" << d;
+    // Sanity: with dy=1 everywhere, dbeta[d] = N because y[n,d] = ... + beta[d].
+    EXPECT_NEAR(h_db[d], static_cast<float>(kSmallN), 1e-3F)
+        << "dbeta should equal N for unit upstream gradient";
+  }
+
+  CUDA_CHECK(cudaFree(d_x));
+  CUDA_CHECK(cudaFree(d_g));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_m));
+  CUDA_CHECK(cudaFree(d_r));
+  CUDA_CHECK(cudaFree(d_y));
+  CUDA_CHECK(cudaFree(d_dy));
+  CUDA_CHECK(cudaFree(d_dx));
+  CUDA_CHECK(cudaFree(d_dg));
+  CUDA_CHECK(cudaFree(d_db));
+}

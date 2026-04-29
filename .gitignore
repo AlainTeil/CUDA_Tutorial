@@ -10,6 +10,21 @@ out/
 *.so
 *.dylib
 
+# CUDA / NVCC artifacts
+*.cubin
+*.ptx
+*.fatbin
+*.i
+*.ii
+
+# Nsight Systems / Compute profile reports
+*.nsys-rep
+*.qdrep
+*.qdstrm
+*.ncu-rep
+*.nvprof
+*.sqlite
+
 # Python
 __pycache__/
 *.pyc
@@ -27,10 +42,16 @@ CMakeUserPresets.json
 # Doxygen output
 docs/html/
 docs/latex/
+docs/xml/
+docs/man/
+docs/rtf/
 
 # ccache / compiler caches
 .cache/
 compile_commands.json
+
+# Logs
+*.log
 
 # OS junk
 .DS_Store

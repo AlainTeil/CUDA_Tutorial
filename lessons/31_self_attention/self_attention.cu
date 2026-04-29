@@ -189,6 +189,88 @@ __global__ void merge_heads_kernel(const float* __restrict__ in, float* __restri
 }
 
 // =============================================================================
+// Backward kernels
+// =============================================================================
+
+/**
+ * @brief Inverse of @ref merge_heads_kernel — scatter d_merged back to d_context.
+ *
+ * Used in backward to convert the gradient w.r.t. the merged tensor
+ * (B × T × D) into the per-head layout (B × nH × T × dK) consumed by
+ * the per-head matmul gradients.
+ */
+__global__ void unmerge_heads_kernel(const float* __restrict__ d_merged,
+                                     float* __restrict__ d_context, int B, int T, int nH, int dK) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total = B * T * nH * dK;
+  if (idx >= total) return;
+  int dk = idx % dK;
+  int h = (idx / dK) % nH;
+  int t = (idx / (dK * nH)) % T;
+  int b = idx / (dK * nH * T);
+  int merged_idx = b * (T * nH * dK) + t * (nH * dK) + h * dK + dk;
+  int ctx_idx = ((b * nH + h) * T + t) * dK + dk;
+  d_context[ctx_idx] = d_merged[merged_idx];
+}
+
+/**
+ * @brief Combine per-head gradients dQ, dK, dV into the interleaved
+ *        gradient tensor d_qkv of shape (B × T × 3D), matching the
+ *        forward QKV buffer's layout.
+ *
+ * d_qkv[b, t, [Q_slice | K_slice | V_slice]] where each slice is D values.
+ */
+__global__ void merge_qkv_grads_kernel(const float* __restrict__ dQ, const float* __restrict__ dKg,
+                                       const float* __restrict__ dV, float* __restrict__ d_qkv,
+                                       int B, int T, int nH, int dK, int D) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total = B * T * nH * dK;
+  if (idx >= total) return;
+  int dk = idx % dK;
+  int h = (idx / dK) % nH;
+  int t = (idx / (dK * nH)) % T;
+  int b = idx / (dK * nH * T);
+  int src = ((b * nH + h) * T + t) * dK + dk;
+  int row_base = b * (T * 3 * D) + t * (3 * D) + h * dK + dk;
+  d_qkv[row_base + 0] = dQ[src];
+  d_qkv[row_base + D] = dKg[src];
+  d_qkv[row_base + 2 * D] = dV[src];
+}
+
+/**
+ * @brief Row-wise softmax backward.
+ *
+ * Given y = softmax(x), dL/dx_i = y_i · (dL/dy_i − Σ_j y_j · dL/dy_j).
+ *
+ * @param d_attn  Upstream gradient w.r.t. softmax output (rows × cols).
+ * @param attn    Saved softmax output from forward (rows × cols).
+ * @param d_pre   Output: gradient w.r.t. softmax input (rows × cols).
+ * @param rows    Number of rows (one softmax row per CUDA block).
+ * @param cols    Row length (softmax operates over this dimension).
+ */
+__global__ void softmax_backward_kernel(const float* __restrict__ d_attn,
+                                        const float* __restrict__ attn, float* d_pre, int rows,
+                                        int cols) {
+  int row = blockIdx.x;
+  if (row >= rows) return;
+  extern __shared__ float smem[];
+  const float* dy = d_attn + row * cols;
+  const float* y = attn + row * cols;
+  float* dx = d_pre + row * cols;
+
+  float local = 0.0F;
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) local += dy[c] * y[c];
+  smem[threadIdx.x] = local;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+    __syncthreads();
+  }
+  float dot = smem[0];
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) dx[c] = y[c] * (dy[c] - dot);
+}
+
+// =============================================================================
 // MultiHeadAttention struct
 // =============================================================================
 
@@ -263,6 +345,98 @@ struct MultiHeadAttention {
     // Part 4b: Output projection  (B*T × D) @ W_O^T → (B*T × D)
     CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, D, B * T, D, &alpha, W_O, D, merged,
                              D, &beta, d_out, D));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Backward pass
+  // ---------------------------------------------------------------------------
+  /**
+   * @brief Multi-head self-attention backward pass.
+   *
+   * Consumes the gradient w.r.t. the layer output @p d_dY and the saved
+   * forward activations (@c Q, @c K, @c V, @c scores (= attn), @c merged in
+   * the struct, plus the input @p d_X passed in by the caller) and produces
+   * gradients w.r.t. the input and both weight matrices.
+   *
+   * Mathematical sketch (per batch × head):
+   *   out         = merged · W_O^T                  → dW_O, dmerged
+   *   merged      = concat_heads(context)           → d_context
+   *   context     = attn · V                        → dV, d_attn
+   *   attn        = softmax(scaled_scores)          → d_scaled = attn ⋅ (d_attn − ⟨d_attn,attn⟩)
+   *   scaled      = (Q · K^T) / √dK                 → dQ = (1/√dK)·d_scaled·K,
+   *                                                   dK = (1/√dK)·d_scaled^T·Q
+   *   qkv         = X · W_QKV^T                     → dW_QKV, dX
+   *
+   * The backward reuses scratch buffers the caller must allocate at the
+   * same shapes as their forward counterparts:
+   *   @p d_dQ, @p d_dK, @p d_dV, @p d_dctx (B × nH × T × dK each),
+   *   @p d_dscores (B × nH × T × T), @p d_dmerged (B × T × D),
+   *   @p d_dqkv (B × T × 3D).
+   *
+   * Outputs (caller-allocated):
+   *   @p d_dX      gradient w.r.t. input X       (B × T × D)
+   *   @p d_dW_QKV  gradient w.r.t. W_QKV         (3D × D)
+   *   @p d_dW_O    gradient w.r.t. W_O           (D × D)
+   */
+  void backward(const float* d_X, const float* d_dY, float* d_dX, float* d_dW_QKV, float* d_dW_O,
+                float* d_dQ, float* d_dK, float* d_dV, float* d_dctx, float* d_dscores,
+                float* d_dmerged, float* d_dqkv) {
+    float alpha = 1.0F, beta = 0.0F;
+    int total = B * T * D;
+    int grid = (total + kBlockSize - 1) / kBlockSize;
+
+    // ---- Output projection backward ----
+    // dW_O[D,D] = dY[BT,D]^T @ merged[BT,D]
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, D, D, B * T, &alpha, merged, D, d_dY,
+                             D, &beta, d_dW_O, D));
+    // dmerged[BT,D] = dY[BT,D] @ W_O[D,D]
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, D, B * T, D, &alpha, W_O, D, d_dY, D,
+                             &beta, d_dmerged, D));
+
+    // ---- Unmerge heads: dmerged -> d_dctx (gradient w.r.t. context) ----
+    unmerge_heads_kernel<<<grid, kBlockSize>>>(d_dmerged, d_dctx, B, T, nH, dK);
+    CUDA_CHECK(cudaGetLastError());
+
+    // ---- d_attn[T,T] = d_context[T,dK] @ V[T,dK]^T  (per b*h) ----
+    CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, T, T, dK, &alpha, V,
+                                           dK, T * dK, d_dctx, dK, T * dK, &beta, d_dscores, T,
+                                           T * T, B * nH));
+
+    // ---- dV[T,dK] = attn[T,T]^T @ d_context[T,dK]  (per b*h) ----
+    // attn lives in `scores` (post-softmax).
+    CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, dK, T, T, &alpha,
+                                           d_dctx, dK, T * dK, scores, T, T * T, &beta, d_dV, dK,
+                                           T * dK, B * nH));
+
+    // ---- Softmax backward: d_scaled = attn ⊙ (d_attn − ⟨d_attn,attn⟩) ----
+    int rows = B * nH * T;
+    int smem_block = 128;
+    softmax_backward_kernel<<<rows, smem_block, smem_block * sizeof(float)>>>(d_dscores, scores,
+                                                                              d_dscores, rows, T);
+    CUDA_CHECK(cudaGetLastError());
+
+    // ---- dQ, dK with the 1/sqrt(dK) scale folded into alpha ----
+    float scale = 1.0F / sqrtf(static_cast<float>(dK));
+    // dQ[T,dK] = d_scaled[T,T] @ K[T,dK]   per b*h
+    CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, dK, T, T, &scale, K,
+                                           dK, T * dK, d_dscores, T, T * T, &beta, d_dQ, dK, T * dK,
+                                           B * nH));
+    // dK[T,dK] = d_scaled[T,T]^T @ Q[T,dK]   per b*h
+    CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, dK, T, T, &scale, Q,
+                                           dK, T * dK, d_dscores, T, T * T, &beta, d_dK, dK, T * dK,
+                                           B * nH));
+
+    // ---- Pack dQ/dK/dV back into interleaved d_qkv (B,T,3D) ----
+    merge_qkv_grads_kernel<<<grid, kBlockSize>>>(d_dQ, d_dK, d_dV, d_dqkv, B, T, nH, dK, D);
+    CUDA_CHECK(cudaGetLastError());
+
+    // ---- QKV projection backward ----
+    // dW_QKV[3D,D] = d_qkv[BT,3D]^T @ X[BT,D]
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, D, 3 * D, B * T, &alpha, d_X, D,
+                             d_dqkv, 3 * D, &beta, d_dW_QKV, D));
+    // dX[BT,D] = d_qkv[BT,3D] @ W_QKV[3D,D]
+    CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, D, B * T, 3 * D, &alpha, W_QKV, D,
+                             d_dqkv, 3 * D, &beta, d_dX, D));
   }
 };
 

@@ -200,6 +200,64 @@ TEST(OptimizerTest, AdamWWeightDecay) {
   CUDA_CHECK(cudaFree(d_v));
 }
 
+// --- AdamW exact-formula test with non-zero gradient + non-zero weight decay ---
+//
+// Validates that one AdamW step produces *exactly* the value predicted by
+// the published update rule (Loshchilov & Hutter 2019), including the
+// decoupled `lr * wd * θ` term.  This complements the directional check
+// above by pinning down the numerical recipe.
+TEST(OptimizerTest, AdamWExactStepWithGradientAndWeightDecay) {
+  float *d_p, *d_g, *d_m, *d_v;
+  CUDA_CHECK(cudaMalloc(&d_p, sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_g, sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_m, sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_v, sizeof(float)));
+
+  const float lr = 0.1F;
+  const float beta1 = 0.9F;
+  const float beta2 = 0.999F;
+  const float eps = 1e-8F;
+  const float wd = 0.05F;
+  const int t = 1;
+  const float p0 = 2.0F;
+  const float g = 0.5F;
+
+  float p = p0;
+  CUDA_CHECK(cudaMemcpy(d_p, &p, sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_g, &g, sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemset(d_m, 0, sizeof(float)));
+  CUDA_CHECK(cudaMemset(d_v, 0, sizeof(float)));
+
+  adamw_step_kernel<<<1, 1>>>(d_p, d_g, d_m, d_v, 1, lr, beta1, beta2, eps, wd, t);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  float p_new = 0.0F, m_new = 0.0F, v_new = 0.0F;
+  CUDA_CHECK(cudaMemcpy(&p_new, d_p, sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&m_new, d_m, sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(&v_new, d_v, sizeof(float), cudaMemcpyDeviceToHost));
+
+  // Expected closed-form values (m_0 = v_0 = 0):
+  const float m_ref = (1.0F - beta1) * g;               // = 0.1 * 0.5 = 0.05
+  const float v_ref = (1.0F - beta2) * g * g;           // = 0.001 * 0.25 = 2.5e-4
+  const float m_hat = m_ref / (1.0F - powf(beta1, t));  // = 0.5
+  const float v_hat = v_ref / (1.0F - powf(beta2, t));  // = 0.25
+  // Note: the kernel applies decoupled WD *before* the Adam update, so the
+  // effective parameter going into the moment subtraction is p0*(1-lr*wd).
+  const float p_after_wd = p0 - lr * wd * p0;
+  const float p_expected = p_after_wd - lr * m_hat / (sqrtf(v_hat) + eps);
+
+  EXPECT_NEAR(m_new, m_ref, 1e-7F);
+  EXPECT_NEAR(v_new, v_ref, 1e-9F);
+  EXPECT_NEAR(p_new, p_expected, 1e-5F);
+  EXPECT_LT(p_new, p_after_wd) << "Positive gradient must drive parameter down further";
+
+  CUDA_CHECK(cudaFree(d_p));
+  CUDA_CHECK(cudaFree(d_g));
+  CUDA_CHECK(cudaFree(d_m));
+  CUDA_CHECK(cudaFree(d_v));
+}
+
 TEST(OptimizerTest, CosineLRSchedule) {
   float lr_start = cosine_lr(1e-3F, 1e-5F, 0, 100);
   float lr_mid = cosine_lr(1e-3F, 1e-5F, 50, 100);

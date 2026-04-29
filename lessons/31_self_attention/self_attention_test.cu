@@ -103,6 +103,62 @@ __global__ void merge_heads_kernel(const float* __restrict__ in, float* __restri
 }
 
 // =============================================================================
+// Backward kernels (mirrors of self_attention.cu)
+// =============================================================================
+
+__global__ void unmerge_heads_kernel(const float* __restrict__ d_merged,
+                                     float* __restrict__ d_context, int B, int T, int nH, int dK) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total = B * T * nH * dK;
+  if (idx >= total) return;
+  int dk = idx % dK;
+  int h = (idx / dK) % nH;
+  int t = (idx / (dK * nH)) % T;
+  int b = idx / (dK * nH * T);
+  int merged_idx = b * (T * nH * dK) + t * (nH * dK) + h * dK + dk;
+  int ctx_idx = ((b * nH + h) * T + t) * dK + dk;
+  d_context[ctx_idx] = d_merged[merged_idx];
+}
+
+__global__ void merge_qkv_grads_kernel(const float* __restrict__ dQ, const float* __restrict__ dKg,
+                                       const float* __restrict__ dV, float* __restrict__ d_qkv,
+                                       int B, int T, int nH, int dK, int D) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total = B * T * nH * dK;
+  if (idx >= total) return;
+  int dk = idx % dK;
+  int h = (idx / dK) % nH;
+  int t = (idx / (dK * nH)) % T;
+  int b = idx / (dK * nH * T);
+  int src = ((b * nH + h) * T + t) * dK + dk;
+  int row_base = b * (T * 3 * D) + t * (3 * D) + h * dK + dk;
+  d_qkv[row_base + 0] = dQ[src];
+  d_qkv[row_base + D] = dKg[src];
+  d_qkv[row_base + 2 * D] = dV[src];
+}
+
+__global__ void softmax_backward_kernel(const float* __restrict__ d_attn,
+                                        const float* __restrict__ attn, float* d_pre, int rows,
+                                        int cols) {
+  int row = blockIdx.x;
+  if (row >= rows) return;
+  extern __shared__ float smem[];
+  const float* dy = d_attn + row * cols;
+  const float* y = attn + row * cols;
+  float* dx = d_pre + row * cols;
+  float local = 0.0F;
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) local += dy[c] * y[c];
+  smem[threadIdx.x] = local;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+    __syncthreads();
+  }
+  float dot = smem[0];
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) dx[c] = y[c] * (dy[c] - dot);
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -336,4 +392,242 @@ TEST_F(SelfAttentionTest, AttentionWeightsSumToOne) {
   CUDA_CHECK(cudaFree(d_Q));
   CUDA_CHECK(cudaFree(d_K));
   CUDA_CHECK(cudaFree(d_scores));
+}
+
+// =============================================================================
+// Backward pass: finite-difference gradient check
+// =============================================================================
+//
+// Verifies the analytical multi-head self-attention backward against a
+// numerical reference computed by central differences:
+//
+//     dL/dx_i  ≈ ( L(x + ε e_i) − L(x − ε e_i) ) / (2ε)
+//
+// L is a synthetic loss L = Σ dY ⊙ out, so dL/dout = dY.  We probe a
+// handful of indices in W_QKV, W_O, and X and check that each analytical
+// gradient component is close to the central-difference estimate.
+// =============================================================================
+
+namespace {
+
+struct MhaBuffers {
+  // weights & input
+  float *W_QKV, *W_O, *X, *out;
+  // forward scratch
+  float *qkv, *Q, *K, *V, *scores, *ctx, *merged;
+  // backward outputs & scratch
+  float *dY, *dX, *dW_QKV, *dW_O;
+  float *dQ, *dKg, *dV, *dctx, *dscores, *dmerged, *dqkv;
+  int B, T, D, nH, dK;
+};
+
+void mha_forward_test(MhaBuffers& m, cublasHandle_t handle) {
+  float alpha = 1.0F, beta = 0.0F;
+  int total = m.B * m.T * m.D;
+  int grid = (total + kBlockSize - 1) / kBlockSize;
+
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 3 * m.D, m.B * m.T, m.D, &alpha,
+                           m.W_QKV, m.D, m.X, m.D, &beta, m.qkv, 3 * m.D));
+  split_heads_kernel<<<grid, kBlockSize>>>(m.qkv, m.Q, m.B, m.T, m.nH, m.dK, 3 * m.D);
+  split_heads_kernel<<<grid, kBlockSize>>>(m.qkv + m.D, m.K, m.B, m.T, m.nH, m.dK, 3 * m.D);
+  split_heads_kernel<<<grid, kBlockSize>>>(m.qkv + 2 * m.D, m.V, m.B, m.T, m.nH, m.dK, 3 * m.D);
+
+  float scale = 1.0F / sqrtf(static_cast<float>(m.dK));
+  CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, m.T, m.T, m.dK, &scale,
+                                         m.K, m.dK, m.T * m.dK, m.Q, m.dK, m.T * m.dK, &beta,
+                                         m.scores, m.T, m.T * m.T, m.B * m.nH));
+
+  int sblock = 32;
+  softmax_kernel<<<m.B * m.nH * m.T, sblock, sblock * sizeof(float)>>>(m.scores, m.B * m.nH * m.T,
+                                                                       m.T);
+
+  CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, m.dK, m.T, m.T, &alpha,
+                                         m.V, m.dK, m.T * m.dK, m.scores, m.T, m.T * m.T, &beta,
+                                         m.ctx, m.dK, m.T * m.dK, m.B * m.nH));
+
+  merge_heads_kernel<<<grid, kBlockSize>>>(m.ctx, m.merged, m.B, m.T, m.nH, m.dK);
+
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, m.D, m.B * m.T, m.D, &alpha, m.W_O,
+                           m.D, m.merged, m.D, &beta, m.out, m.D));
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void mha_backward_test(MhaBuffers& m, cublasHandle_t handle) {
+  float alpha = 1.0F, beta = 0.0F;
+  int total = m.B * m.T * m.D;
+  int grid = (total + kBlockSize - 1) / kBlockSize;
+
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, m.D, m.D, m.B * m.T, &alpha, m.merged,
+                           m.D, m.dY, m.D, &beta, m.dW_O, m.D));
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m.D, m.B * m.T, m.D, &alpha, m.W_O,
+                           m.D, m.dY, m.D, &beta, m.dmerged, m.D));
+
+  unmerge_heads_kernel<<<grid, kBlockSize>>>(m.dmerged, m.dctx, m.B, m.T, m.nH, m.dK);
+
+  CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, m.T, m.T, m.dK, &alpha,
+                                         m.V, m.dK, m.T * m.dK, m.dctx, m.dK, m.T * m.dK, &beta,
+                                         m.dscores, m.T, m.T * m.T, m.B * m.nH));
+
+  CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, m.dK, m.T, m.T, &alpha,
+                                         m.dctx, m.dK, m.T * m.dK, m.scores, m.T, m.T * m.T, &beta,
+                                         m.dV, m.dK, m.T * m.dK, m.B * m.nH));
+
+  int rows = m.B * m.nH * m.T;
+  int sblock = 32;
+  softmax_backward_kernel<<<rows, sblock, sblock * sizeof(float)>>>(m.dscores, m.scores, m.dscores,
+                                                                    rows, m.T);
+
+  float scale = 1.0F / sqrtf(static_cast<float>(m.dK));
+  CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, m.dK, m.T, m.T, &scale,
+                                         m.K, m.dK, m.T * m.dK, m.dscores, m.T, m.T * m.T, &beta,
+                                         m.dQ, m.dK, m.T * m.dK, m.B * m.nH));
+  CUBLAS_CHECK(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, m.dK, m.T, m.T, &scale,
+                                         m.Q, m.dK, m.T * m.dK, m.dscores, m.T, m.T * m.T, &beta,
+                                         m.dKg, m.dK, m.T * m.dK, m.B * m.nH));
+
+  merge_qkv_grads_kernel<<<grid, kBlockSize>>>(m.dQ, m.dKg, m.dV, m.dqkv, m.B, m.T, m.nH, m.dK,
+                                               m.D);
+
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, m.D, 3 * m.D, m.B * m.T, &alpha, m.X,
+                           m.D, m.dqkv, 3 * m.D, &beta, m.dW_QKV, m.D));
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m.D, m.B * m.T, 3 * m.D, &alpha,
+                           m.W_QKV, m.D, m.dqkv, 3 * m.D, &beta, m.dX, m.D));
+  CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+}  // namespace
+
+TEST_F(SelfAttentionTest, BackwardMatchesFiniteDifference) {
+  constexpr int kB = 1;
+  constexpr int kT = 3;
+  constexpr int kD = 4;
+  constexpr int kNH = 2;
+  constexpr int kDK = kD / kNH;  // 2
+
+  // Host inputs
+  std::vector<float> h_X(kB * kT * kD);
+  std::vector<float> h_W_QKV(3 * kD * kD);
+  std::vector<float> h_W_O(kD * kD);
+  std::vector<float> h_dY(kB * kT * kD);
+
+  std::srand(2024);
+  auto rnd = []() {
+    return (static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX) - 0.5F) * 0.6F;
+  };
+  for (auto& v : h_X) v = rnd();
+  for (auto& v : h_W_QKV) v = rnd();
+  for (auto& v : h_W_O) v = rnd();
+  for (auto& v : h_dY) v = rnd();
+
+  MhaBuffers m{};
+  m.B = kB;
+  m.T = kT;
+  m.D = kD;
+  m.nH = kNH;
+  m.dK = kDK;
+  auto alloc = [](float** p, int n) { CUDA_CHECK(cudaMalloc(p, n * sizeof(float))); };
+  alloc(&m.W_QKV, 3 * kD * kD);
+  alloc(&m.W_O, kD * kD);
+  alloc(&m.X, kB * kT * kD);
+  alloc(&m.out, kB * kT * kD);
+  alloc(&m.qkv, kB * kT * 3 * kD);
+  alloc(&m.Q, kB * kNH * kT * kDK);
+  alloc(&m.K, kB * kNH * kT * kDK);
+  alloc(&m.V, kB * kNH * kT * kDK);
+  alloc(&m.scores, kB * kNH * kT * kT);
+  alloc(&m.ctx, kB * kNH * kT * kDK);
+  alloc(&m.merged, kB * kT * kD);
+  alloc(&m.dY, kB * kT * kD);
+  alloc(&m.dX, kB * kT * kD);
+  alloc(&m.dW_QKV, 3 * kD * kD);
+  alloc(&m.dW_O, kD * kD);
+  alloc(&m.dQ, kB * kNH * kT * kDK);
+  alloc(&m.dKg, kB * kNH * kT * kDK);
+  alloc(&m.dV, kB * kNH * kT * kDK);
+  alloc(&m.dctx, kB * kNH * kT * kDK);
+  alloc(&m.dscores, kB * kNH * kT * kT);
+  alloc(&m.dmerged, kB * kT * kD);
+  alloc(&m.dqkv, kB * kT * 3 * kD);
+
+  auto upload = [](float* d, const std::vector<float>& h) {
+    CUDA_CHECK(cudaMemcpy(d, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice));
+  };
+  upload(m.W_QKV, h_W_QKV);
+  upload(m.W_O, h_W_O);
+  upload(m.X, h_X);
+  upload(m.dY, h_dY);
+
+  // Analytical backward
+  mha_forward_test(m, handle_);
+  mha_backward_test(m, handle_);
+
+  std::vector<float> h_dX(kB * kT * kD), h_dW_QKV(3 * kD * kD), h_dW_O(kD * kD);
+  CUDA_CHECK(cudaMemcpy(h_dX.data(), m.dX, h_dX.size() * sizeof(float), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_dW_QKV.data(), m.dW_QKV, h_dW_QKV.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(
+      cudaMemcpy(h_dW_O.data(), m.dW_O, h_dW_O.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+  // Helper: loss L(out) = sum dY ⊙ out
+  auto eval_loss = [&]() {
+    mha_forward_test(m, handle_);
+    std::vector<float> h_out(kB * kT * kD);
+    CUDA_CHECK(
+        cudaMemcpy(h_out.data(), m.out, h_out.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    float s = 0.0F;
+    for (size_t i = 0; i < h_out.size(); ++i) s += h_out[i] * h_dY[i];
+    return s;
+  };
+
+  const float kEps = 1e-3F;
+  const float kAbs = 5e-3F;
+  const float kRel = 5e-3F;
+
+  // Probe a handful of indices in each parameter
+  auto check_param = [&](const char* name, std::vector<float>& host_param, float* d_param,
+                         const std::vector<float>& analytical, const std::vector<int>& indices) {
+    for (int idx : indices) {
+      float orig = host_param[idx];
+      host_param[idx] = orig + kEps;
+      upload(d_param, host_param);
+      float l_plus = eval_loss();
+      host_param[idx] = orig - kEps;
+      upload(d_param, host_param);
+      float l_minus = eval_loss();
+      host_param[idx] = orig;
+      upload(d_param, host_param);
+      float fd = (l_plus - l_minus) / (2.0F * kEps);
+      float ana = analytical[idx];
+      float tol = kAbs + kRel * std::fabs(fd);
+      EXPECT_NEAR(ana, fd, tol) << name << "[" << idx << "] analytical=" << ana << " fd=" << fd;
+    }
+  };
+
+  check_param("dX", h_X, m.X, h_dX, {0, 3, 5, 7, static_cast<int>(h_X.size()) - 1});
+  check_param("dW_O", h_W_O, m.W_O, h_dW_O, {0, 5, 9, static_cast<int>(h_W_O.size()) - 1});
+  check_param("dW_QKV", h_W_QKV, m.W_QKV, h_dW_QKV,
+              {0, 8, 17, 31, static_cast<int>(h_W_QKV.size()) - 1});
+
+  CUDA_CHECK(cudaFree(m.W_QKV));
+  CUDA_CHECK(cudaFree(m.W_O));
+  CUDA_CHECK(cudaFree(m.X));
+  CUDA_CHECK(cudaFree(m.out));
+  CUDA_CHECK(cudaFree(m.qkv));
+  CUDA_CHECK(cudaFree(m.Q));
+  CUDA_CHECK(cudaFree(m.K));
+  CUDA_CHECK(cudaFree(m.V));
+  CUDA_CHECK(cudaFree(m.scores));
+  CUDA_CHECK(cudaFree(m.ctx));
+  CUDA_CHECK(cudaFree(m.merged));
+  CUDA_CHECK(cudaFree(m.dY));
+  CUDA_CHECK(cudaFree(m.dX));
+  CUDA_CHECK(cudaFree(m.dW_QKV));
+  CUDA_CHECK(cudaFree(m.dW_O));
+  CUDA_CHECK(cudaFree(m.dQ));
+  CUDA_CHECK(cudaFree(m.dKg));
+  CUDA_CHECK(cudaFree(m.dV));
+  CUDA_CHECK(cudaFree(m.dctx));
+  CUDA_CHECK(cudaFree(m.dscores));
+  CUDA_CHECK(cudaFree(m.dmerged));
+  CUDA_CHECK(cudaFree(m.dqkv));
 }

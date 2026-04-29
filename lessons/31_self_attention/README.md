@@ -18,13 +18,14 @@ dot-product attention with batched cuBLAS GEMMs.
 | Scaled dot-product | scores = Q·Kᵀ / √d_k; weights = softmax(scores); context = weights · V |
 | Merge heads | Reshape (B, h, T, d_k) → (B, T, D) |
 | Output projection | Final linear transformation via GEMM |
+| Backward pass | Analytical gradients dX, dW_QKV, dW_O via softmax-backward + batched GEMMs |
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `self_attention.cu` | All five attention components + main demo |
-| `self_attention_test.cu` | Split/merge round-trip, softmax properties, identity weight tests |
+| `self_attention.cu` | `MultiHeadAttention` struct with `forward()` **and** `backward()` (softmax-backward, unmerge-heads, dQ/dK/dV → d_qkv pack) plus the main demo |
+| `self_attention_test.cu` | Split/merge round-trip, softmax properties, identity-weight forward, **and** `BackwardMatchesFiniteDifference` (central-difference gradient check on dX / dW_QKV / dW_O) |
 
 ## Build & Run
 
@@ -45,3 +46,7 @@ ctest --test-dir build -R 31_self_attention
 2. Why 1/√d_k scaling prevents softmax saturation for large dimensions.
 3. How batched `cublasSgemmStridedBatched` efficiently handles all heads.
 4. How split/merge reshaping enables per-head independent computation.
+5. How the backward pass chains four building blocks — output-projection
+   gradient, attention-weighted gradient w.r.t. V, the softmax-Jacobian
+   trick `dy ⊙ (g − ⟨g, y⟩)`, and the scaled-score gradients for Q and K
+   — each implemented as one cuBLAS batched GEMM or one custom kernel.

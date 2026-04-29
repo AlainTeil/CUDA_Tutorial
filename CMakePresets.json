@@ -55,6 +55,16 @@
       "cacheVariables": {
         "CUDA_TUTORIAL_USE_CUDNN": "ON"
       }
+    },
+    {
+      "name": "ubsan",
+      "displayName": "RelWithDebInfo + UBSan (host)",
+      "description": "Enables UndefinedBehaviorSanitizer for host code. Pair with `compute-sanitizer` (see README) for device-side checks.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CUDA_TUTORIAL_ENABLE_UBSAN": "ON"
+      }
     }
   ],
 
@@ -78,6 +88,10 @@
     {
       "name": "cudnn",
       "configurePreset": "cudnn"
+    },
+    {
+      "name": "ubsan",
+      "configurePreset": "ubsan"
     }
   ],
 
@@ -110,6 +124,15 @@
       "name": "cudnn",
       "configurePreset": "cudnn",
       "output": { "outputOnFailure": true },
+      "execution": { "jobs": 4 }
+    },
+    {
+      "name": "ubsan",
+      "configurePreset": "ubsan",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+      },
       "execution": { "jobs": 4 }
     }
   ]

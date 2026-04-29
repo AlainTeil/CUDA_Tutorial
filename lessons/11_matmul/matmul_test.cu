@@ -93,8 +93,14 @@ TEST_P(MatmulTest, NaiveMatchesCPU) {
   std::vector<float> hC(hC_ref.size());
   CUDA_CHECK(cudaMemcpy(hC.data(), dC, hC.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
+  // Tolerance scales with K because matmul accumulates K float multiplies
+  // per element; FP32 round-off grows ~ ε·K. The fixed 1e-3 was tight at
+  // K=128 but borderline at K=256+. Use abs + rel.
+  constexpr float kAbsTol = 1e-4F;
+  constexpr float kRelTol = 1e-5F;  // ≈20× FP32 epsilon
   for (size_t i = 0; i < hC.size(); ++i) {
-    EXPECT_NEAR(hC[i], hC_ref[i], 1e-3F) << "at index " << i;
+    const float tol = kAbsTol + kRelTol * static_cast<float>(K) * std::abs(hC_ref[i]);
+    EXPECT_NEAR(hC[i], hC_ref[i], tol) << "at index " << i << " (naive, K=" << K << ")";
   }
 
   CUDA_CHECK(cudaFree(dA));
@@ -130,8 +136,12 @@ TEST_P(MatmulTest, TiledMatchesCPU) {
   std::vector<float> hC(hC_ref.size());
   CUDA_CHECK(cudaMemcpy(hC.data(), dC, hC.size() * sizeof(float), cudaMemcpyDeviceToHost));
 
+  // Same K-scaled tolerance as the naive variant.
+  constexpr float kAbsTol = 1e-4F;
+  constexpr float kRelTol = 1e-5F;
   for (size_t i = 0; i < hC.size(); ++i) {
-    EXPECT_NEAR(hC[i], hC_ref[i], 1e-3F) << "at index " << i;
+    const float tol = kAbsTol + kRelTol * static_cast<float>(K) * std::abs(hC_ref[i]);
+    EXPECT_NEAR(hC[i], hC_ref[i], tol) << "at index " << i << " (tiled, K=" << K << ")";
   }
 
   CUDA_CHECK(cudaFree(dA));

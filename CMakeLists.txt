@@ -25,10 +25,12 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS        OFF)
 
 # ---------------------------------------------------------------------------
-# CUDA architecture list  (Turing → Hopper; RTX 3070 = sm_86)
+# CUDA architecture list  (Turing → Hopper; RTX 3070 = sm_86, H100 = sm_90)
+# Override at configure time, e.g. -DCMAKE_CUDA_ARCHITECTURES="86" for a
+# faster, single-arch build.  Hopper sm_100 is included for forward-compat.
 # ---------------------------------------------------------------------------
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90")
+  set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -50,7 +52,35 @@ include(cmake/CompilerWarnings.cmake)
 # ---------------------------------------------------------------------------
 option(CUDA_TUTORIAL_USE_CUDNN "Enable cuDNN/cuBLAS lesson (Lesson 19)" OFF)
 option(CUDA_TUTORIAL_BUILD_TESTS "Build unit tests" ON)
-option(CUDA_TUTORIAL_BUILD_DOCS  "Add 'docs' target for Doxygen" ON)
+# Default OFF to match every CMakePresets.json preset; enable explicitly with
+# -DCUDA_TUTORIAL_BUILD_DOCS=ON if Doxygen is installed.
+option(CUDA_TUTORIAL_BUILD_DOCS  "Add 'docs' target for Doxygen" OFF)
+
+# ---------------------------------------------------------------------------
+# Host-side UndefinedBehaviorSanitizer (UBSan)
+# Catches signed-integer overflow, OOB shifts, misaligned loads, null derefs,
+# bad function-pointer casts, etc., in host code.  Device code is unaffected
+# (use NVIDIA `compute-sanitizer` for that — see README).
+# Enabled via the `ubsan` CMake preset or -DCUDA_TUTORIAL_ENABLE_UBSAN=ON.
+# Note: ASan is intentionally not wired up here because it interacts poorly
+# with the CUDA runtime initialisation path on many setups.
+# ---------------------------------------------------------------------------
+option(CUDA_TUTORIAL_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (host code)" OFF)
+if(CUDA_TUTORIAL_ENABLE_UBSAN)
+  if(NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    message(FATAL_ERROR "CUDA_TUTORIAL_ENABLE_UBSAN requires GCC or Clang")
+  endif()
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=undefined>
+    $<$<COMPILE_LANGUAGE:C,CXX>:-fno-sanitize-recover=all>
+    $<$<COMPILE_LANGUAGE:C,CXX>:-fno-omit-frame-pointer>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fsanitize=undefined>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-sanitize-recover=all>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-omit-frame-pointer>
+  )
+  add_link_options(-fsanitize=undefined)
+  message(STATUS "UBSan enabled for host code (errors abort the program)")
+endif()
 
 # ---------------------------------------------------------------------------
 # GoogleTest via FetchContent
@@ -72,8 +102,10 @@ endif()
 
 # ---------------------------------------------------------------------------
 # CUDA Toolkit imported targets (cublas, cudnn, cudart, …)
+# Minimum 12.0 for C++20 device-code support; the tutorial is regularly
+# tested with CUDA 13.x.
 # ---------------------------------------------------------------------------
-find_package(CUDAToolkit REQUIRED)
+find_package(CUDAToolkit 12.0 REQUIRED)
 
 # ---------------------------------------------------------------------------
 # Lessons
@@ -96,6 +128,8 @@ if(CLANG_FORMAT_EXE)
     COMMENT "Running clang-format on all source files"
     VERBATIM
   )
+else()
+  message(STATUS "clang-format not found; 'format' target disabled")
 endif()
 
 # ---------------------------------------------------------------------------

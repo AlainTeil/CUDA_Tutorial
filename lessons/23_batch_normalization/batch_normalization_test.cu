@@ -461,3 +461,68 @@ TEST(BatchNormTest, InputGradFiniteDifference) {
   CUDA_CHECK(cudaFree(d_dx));
   bn.free_all();
 }
+
+TEST(BatchNormTest, BetaGradFiniteDifference) {
+  constexpr int kN = 16;
+  constexpr int kC = 4;
+  constexpr float kEps = 1e-5F;
+  constexpr float kDelta = 1e-3F;
+
+  std::mt19937 gen(31);
+  std::normal_distribution<float> dist(0.0F, 1.0F);
+  std::vector<float> h_x(kN * kC);
+  for (auto& v : h_x) v = dist(gen);
+  std::vector<float> h_gamma(kC, 1.5F);
+  std::vector<float> h_beta(kC, 0.5F);
+
+  BNBuffers bn;
+  bn.alloc(kN, kC, kEps);
+  bn.forward(h_x, h_gamma, h_beta);
+
+  // Analytic dbeta with upstream gradient = 1
+  float *d_dy, *d_dgamma, *d_dbeta;
+  auto bNC = static_cast<size_t>(kN * kC) * sizeof(float);
+  auto bC = static_cast<size_t>(kC) * sizeof(float);
+  CUDA_CHECK(cudaMalloc(&d_dy, bNC));
+  CUDA_CHECK(cudaMalloc(&d_dgamma, bC));
+  CUDA_CHECK(cudaMalloc(&d_dbeta, bC));
+  std::vector<float> h_dy(kN * kC, 1.0F);
+  CUDA_CHECK(cudaMemcpy(d_dy, h_dy.data(), bNC, cudaMemcpyHostToDevice));
+
+  int smem2 = 2 * kBlockSize * static_cast<int>(sizeof(float));
+  batchnorm_backward_dgamma_dbeta<<<kC, kBlockSize, smem2>>>(d_dy, bn.d_x_hat, d_dgamma, d_dbeta,
+                                                             kN, kC);
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  std::vector<float> h_dbeta(kC);
+  CUDA_CHECK(cudaMemcpy(h_dbeta.data(), d_dbeta, bC, cudaMemcpyDeviceToHost));
+
+  // Numerical: d(sum(y))/d(beta[c]) should equal N (since y[n,c] = ... + beta[c]).
+  // We verify this against a central-difference probe per channel for robustness.
+  for (int c = 0; c < kC; ++c) {
+    auto bp = h_beta;
+    auto bm = h_beta;
+    bp[static_cast<size_t>(c)] += kDelta;
+    bm[static_cast<size_t>(c)] -= kDelta;
+
+    bn.forward(h_x, h_gamma, bp);
+    auto yp = bn.get_y();
+    bn.forward(h_x, h_gamma, bm);
+    auto ym = bn.get_y();
+
+    double num = 0.0;
+    for (size_t i = 0; i < yp.size(); ++i) {
+      num += static_cast<double>(yp[i] - ym[i]) / (2.0 * kDelta);
+    }
+    EXPECT_NEAR(h_dbeta[static_cast<size_t>(c)], num, 0.05)
+        << "beta gradient mismatch at feature " << c;
+    EXPECT_NEAR(h_dbeta[static_cast<size_t>(c)], static_cast<float>(kN), 1e-3F)
+        << "beta gradient should equal N when upstream gradient is 1";
+  }
+
+  CUDA_CHECK(cudaFree(d_dy));
+  CUDA_CHECK(cudaFree(d_dgamma));
+  CUDA_CHECK(cudaFree(d_dbeta));
+  bn.free_all();
+}

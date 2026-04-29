@@ -15,14 +15,17 @@ the im2col + GEMM approach used by deep learning frameworks.
 |---------|-------------|
 | Direct convolution | Straightforward but non-coalesced memory access |
 | im2col | Unfolds input patches into columns → converts conv to GEMM |
+| im2col + tiled GEMM | Full pipeline: `im2col_kernel` → 16 × 16 tiled matmul → output |
+| Backward (dkernel) | Cross-correlation of upstream gradient with input |
+| Backward (dx) | Scatter-with-atomics from upstream gradient through rotated kernel |
 | Valid convolution | No padding; output is (H − KH + 1) × (W − KW + 1) |
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `conv2d.cu` | Direct kernel + im2col kernel + CPU reference |
-| `conv2d_test.cu` | Parameterised sizes, identity kernel test |
+| `conv2d.cu` | Forward (direct + im2col+tiled-GEMM) **and** backward (`conv2d_backward_dkernel`, `conv2d_backward_dx`) + CPU reference |
+| `conv2d_test.cu` | Direct + im2col→GEMM forward tests over five (H, W, KH, KW) shapes; identity-kernel sanity check; finite-difference checks for `dkernel` and `dx` |
 
 ## Build & Run
 
@@ -41,4 +44,6 @@ ctest --test-dir build -R 14_conv2d
 
 1. The trade-off between direct convolution and im2col + GEMM.
 2. How im2col converts spatial convolution into matrix multiplication.
-3. That production libraries (cuDNN, Lesson 19) use autotuned algorithms.
+3. How an inlined tiled GEMM (the same pattern as Lesson 11) finishes the job once the columns are laid out.
+4. How the backward pass derives `dkernel` (cross-correlation `dout ⋆ in`) and `dx` (scatter through the rotated kernel) from the same forward equation.
+5. That production libraries (cuDNN, Lesson 19) use autotuned algorithms.

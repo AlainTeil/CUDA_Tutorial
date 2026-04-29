@@ -183,6 +183,44 @@ TEST(ActivationsTest, SigmoidRange) {
   }
 }
 
+TEST(ActivationsTest, SigmoidBackwardFiniteDiff) {
+  constexpr int kN = 32;
+  constexpr float kEps = 1e-3F;
+  std::vector<float> in(kN);
+  for (int i = 0; i < kN; ++i) in[static_cast<size_t>(i)] = static_cast<float>(i) / kN - 0.5F;
+  std::vector<float> go(kN, 1.0F);
+
+  float *d_in, *d_out, *d_go, *d_gi;
+  CUDA_CHECK(cudaMalloc(&d_in, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_go, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_gi, kN * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, in.data(), kN * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_go, go.data(), kN * sizeof(float), cudaMemcpyHostToDevice));
+  sigmoid_forward<<<1, 256>>>(d_in, d_out, kN);
+  sigmoid_backward<<<1, 256>>>(d_out, d_go, d_gi, kN);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  std::vector<float> gi(kN);
+  CUDA_CHECK(cudaMemcpy(gi.data(), d_gi, kN * sizeof(float), cudaMemcpyDeviceToHost));
+
+  for (int i = 0; i < kN; ++i) {
+    auto ip = in;
+    auto im = in;
+    ip[static_cast<size_t>(i)] += kEps;
+    im[static_cast<size_t>(i)] -= kEps;
+    auto op = gpu_apply(sigmoid_forward, ip);
+    auto om = gpu_apply(sigmoid_forward, im);
+    float num = 0.0F;
+    for (int j = 0; j < kN; ++j)
+      num += (op[static_cast<size_t>(j)] - om[static_cast<size_t>(j)]) / (2 * kEps);
+    EXPECT_NEAR(gi[static_cast<size_t>(i)], num, 5e-4F) << "at " << i;
+  }
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
+  CUDA_CHECK(cudaFree(d_go));
+  CUDA_CHECK(cudaFree(d_gi));
+}
+
 // ---- Tanh Tests -------------------------------------------------------------
 
 TEST(ActivationsTest, TanhForward) {
@@ -198,6 +236,44 @@ TEST(ActivationsTest, TanhRange) {
     EXPECT_GE(v, -1.0F);
     EXPECT_LE(v, 1.0F);
   }
+}
+
+TEST(ActivationsTest, TanhBackwardFiniteDiff) {
+  constexpr int kN = 32;
+  constexpr float kEps = 1e-3F;
+  std::vector<float> in(kN);
+  for (int i = 0; i < kN; ++i) in[static_cast<size_t>(i)] = static_cast<float>(i) / kN - 0.5F;
+  std::vector<float> go(kN, 1.0F);
+
+  float *d_in, *d_out, *d_go, *d_gi;
+  CUDA_CHECK(cudaMalloc(&d_in, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_out, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_go, kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_gi, kN * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_in, in.data(), kN * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_go, go.data(), kN * sizeof(float), cudaMemcpyHostToDevice));
+  tanh_forward<<<1, 256>>>(d_in, d_out, kN);
+  tanh_backward<<<1, 256>>>(d_out, d_go, d_gi, kN);
+  CUDA_CHECK(cudaDeviceSynchronize());
+  std::vector<float> gi(kN);
+  CUDA_CHECK(cudaMemcpy(gi.data(), d_gi, kN * sizeof(float), cudaMemcpyDeviceToHost));
+
+  for (int i = 0; i < kN; ++i) {
+    auto ip = in;
+    auto im = in;
+    ip[static_cast<size_t>(i)] += kEps;
+    im[static_cast<size_t>(i)] -= kEps;
+    auto op = gpu_apply(tanh_forward, ip);
+    auto om = gpu_apply(tanh_forward, im);
+    float num = 0.0F;
+    for (int j = 0; j < kN; ++j)
+      num += (op[static_cast<size_t>(j)] - om[static_cast<size_t>(j)]) / (2 * kEps);
+    EXPECT_NEAR(gi[static_cast<size_t>(i)], num, 5e-4F) << "at " << i;
+  }
+  CUDA_CHECK(cudaFree(d_in));
+  CUDA_CHECK(cudaFree(d_out));
+  CUDA_CHECK(cudaFree(d_go));
+  CUDA_CHECK(cudaFree(d_gi));
 }
 
 // ---- Softmax Tests ----------------------------------------------------------

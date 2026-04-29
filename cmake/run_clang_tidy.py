@@ -65,14 +65,50 @@ def _should_drop(raw_tok: str) -> bool:
 
 
 def _detect_cuda_path() -> str:
-    """Best-effort detection of the CUDA toolkit path."""
+    """Best-effort detection of the CUDA toolkit path.
+
+    Honours the conventional ``CUDA_HOME`` / ``CUDA_PATH`` environment
+    variables before falling back to common install locations.
+    """
+    for env_var in ("CUDA_HOME", "CUDA_PATH"):
+        env_val = os.environ.get(env_var)
+        if env_val and os.path.isdir(env_val):
+            return env_val
     for candidate in ("/usr/local/cuda", "/usr/local/cuda-13.1"):
         if os.path.isdir(candidate):
             return candidate
     return "/usr/local/cuda"
 
 
-def _sanitise_command(cmd: str, cuda_path: str) -> str:
+def _detect_cuda_arch(build_dir: str) -> str:
+    """Read the first arch from CMakeCache.txt; fall back to sm_86.
+
+    clang-tidy must lint for the same arch the build targets, otherwise
+    feature-gated code (``__CUDA_ARCH__`` ifdefs) is analysed for the wrong
+    GPU.  We pick the lowest arch from CMAKE_CUDA_ARCHITECTURES so that any
+    feature available on the target build is also visible to clang-tidy.
+    """
+    cache_path = os.path.join(build_dir, "CMakeCache.txt")
+    if not os.path.isfile(cache_path):
+        return "sm_86"
+    pattern = re.compile(r"^CMAKE_CUDA_ARCHITECTURES(?::\w+)?=(.+)$")
+    try:
+        with open(cache_path) as f:
+            for line in f:
+                m = pattern.match(line.strip())
+                if not m:
+                    continue
+                arches = [a.strip() for a in m.group(1).split(";") if a.strip()]
+                # Strip trailing letters (e.g. "90a" → "90") for clang.
+                first = re.match(r"(\d+)", arches[0])
+                if first:
+                    return f"sm_{first.group(1)}"
+    except OSError:
+        pass
+    return "sm_86"
+
+
+def _sanitise_command(cmd: str, cuda_path: str, cuda_arch: str) -> str:
     """Rewrite an nvcc compile command for Clang's CUDA frontend."""
     tokens = cmd.split()
     out: list[str] = []
@@ -109,7 +145,7 @@ def _sanitise_command(cmd: str, cuda_path: str) -> str:
     cccl_dir = os.path.join(cuda_path, "include", "cccl")
     out += [
         f"--cuda-path={cuda_path}",
-        "--cuda-gpu-arch=sm_86",
+        f"--cuda-gpu-arch={cuda_arch}",
         "--no-cuda-version-check",
         "-xcuda",
         "-nocudalib",
@@ -139,14 +175,15 @@ def main() -> int:
         entries = json.load(f)
 
     cuda_path = _detect_cuda_path()
+    cuda_arch = _detect_cuda_arch(build_dir)
 
     # Sanitise every entry.
     for entry in entries:
         if "command" in entry:
-            entry["command"] = _sanitise_command(entry["command"], cuda_path)
+            entry["command"] = _sanitise_command(entry["command"], cuda_path, cuda_arch)
         if "arguments" in entry:
             entry["command"] = _sanitise_command(
-                " ".join(entry["arguments"]), cuda_path)
+                " ".join(entry["arguments"]), cuda_path, cuda_arch)
             del entry["arguments"]
 
     tidy_db_dir = os.path.join(build_dir, "tidy_db")
